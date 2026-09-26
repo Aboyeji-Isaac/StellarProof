@@ -15,6 +15,7 @@ export interface IStorageRecord extends Document {
   cid?: string;              // IPFS Content ID
   publicId?: string;         // Cloudinary Public ID
   contentHash?: string;      // SHA-256 (hex) of the uploaded bytes
+  fallbackFrom?: StorageProvider; // Requested provider when the upload fell back to `provider`
   size: number;              // File size in bytes
   mimetype: string;          // MIME type (e.g., image/png)
   originalFilename: string;  // Original uploaded filename
@@ -71,6 +72,10 @@ const StorageRecordSchema: Schema = new Schema(
       type: String,
       lowercase: true,
       match: [/^[a-f0-9]{64}$/, 'contentHash must be a SHA-256 hex digest'],
+    },
+    fallbackFrom: {
+      type: String,
+      enum: ['cloudinary', 'ipfs'],
     },
     size: {
       type: Number,

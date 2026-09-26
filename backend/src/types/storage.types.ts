@@ -17,6 +17,7 @@ export interface UploadRequest {
   kind?: StorageRecordKind;            // defaults to 'media'
   assetId?: string;                    // Asset the stored object belongs to
   metadata?: Record<string, string>;   // Provider metadata (IPFS pin key-values)
+  allowFallback?: boolean;             // IPFS -> Cloudinary fallback on failure (default true)
 }
 
 export interface UploadResult {
@@ -25,6 +26,7 @@ export interface UploadResult {
   url: string;
   cid?: string;          // IPFS only
   publicId?: string;     // Cloudinary only
+  fallbackFrom?: StorageProvider; // Requested provider when the upload fell back
   kind?: StorageRecordKind;
   assetId?: string;
   size: number;

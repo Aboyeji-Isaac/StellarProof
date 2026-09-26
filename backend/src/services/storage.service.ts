@@ -13,6 +13,7 @@ import { ipfsService } from './ipfs.service';
 import StorageRecord, { IStorageRecord } from '../models/StorageRecord.model';
 import { AppError } from '../errors/AppError';
 import { env } from '../config/env';
+import logger from '../utils/logger';
 
 /**
  * CIDv0: base58btc multihash starting with "Qm" (46 chars).
@@ -23,6 +24,10 @@ const CID_V1_BASE32_PATTERN = /^b[a-z2-7]{50,}$/;
 
 export function isValidCid(cid: string): boolean {
   return CID_V0_PATTERN.test(cid) || CID_V1_BASE32_PATTERN.test(cid);
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function sha256Hex(buffer: Buffer): string {
@@ -86,60 +91,35 @@ class StorageOrchestratorService {
       }
     }
 
-    // Delegate to provider
+    // Delegate to provider; IPFS media uploads fall back to Cloudinary
     let uploadResult: UploadResult;
+    let fallbackFrom: StorageProvider | undefined;
 
     try {
-      switch (request.storageProvider) {
-        case 'cloudinary':
-          const cloudinaryUpload = await cloudinaryService.uploadBuffer(request.buffer);
-          uploadResult = {
-            provider: 'cloudinary',
-            url: cloudinaryUpload.secure_url,
-            publicId: cloudinaryUpload.public_id,
-            size: cloudinaryUpload.bytes,
-            mimetype: request.mimetype,
-            uploadedAt: new Date(cloudinaryUpload.created_at)
-          };
-          break;
-
-        case 'ipfs':
-          const ipfsUpload = await ipfsService.upload({
-            content: request.buffer,
-            name: request.originalname,
-            ...(request.metadata ? { metadata: request.metadata } : {}),
-          });
-          uploadResult = {
-            provider: 'ipfs',
-            url: ipfsUpload.gatewayUrl,
-            cid: ipfsUpload.cid,
-            size: ipfsUpload.size,
-            mimetype: request.mimetype,
-            uploadedAt: new Date(ipfsUpload.timestamp)
-          };
-          break;
-
-        default:
-          // TypeScript exhaustiveness check
-          const _exhaustive: never = request.storageProvider;
-          throw new StorageError(
-            request.storageProvider,
-            'orchestrate',
-            `Unhandled provider: ${_exhaustive}`,
-            500,
-          );
-      }
-    } catch (error) {
-      if (error instanceof StorageError) {
-        throw error;
+      uploadResult = await this.uploadToProvider(request.storageProvider, request);
+    } catch (primaryError) {
+      if (!this.canFallBack(request)) {
+        throw primaryError;
       }
 
-      throw new StorageError(
-        request.storageProvider,
-        'orchestrate',
-        `Provider delegation failed: ${error instanceof Error ? error.message : String(error)}`,
-        502,
-      );
+      const primaryReason = errorMessage(primaryError);
+      logger.warn('IPFS upload failed; falling back to Cloudinary', {
+        originalFilename: request.originalname,
+        userId: request.userId,
+        reason: primaryReason,
+      });
+
+      try {
+        uploadResult = await this.uploadToProvider('cloudinary', request);
+        fallbackFrom = request.storageProvider;
+      } catch (fallbackError) {
+        throw new StorageError(
+          'cloudinary',
+          'fallback',
+          `IPFS upload failed (${primaryReason}) and Cloudinary fallback failed (${errorMessage(fallbackError)})`,
+          502,
+        );
+      }
     }
 
     // Provider returned a CID we already track: reuse that record
@@ -163,6 +143,7 @@ class StorageOrchestratorService {
       cid,
       publicId: uploadResult.publicId,
       contentHash,
+      fallbackFrom,
       size: uploadResult.size,
       mimetype: uploadResult.mimetype,
       originalFilename: request.originalname,
@@ -238,6 +219,61 @@ class StorageOrchestratorService {
     return record?.assetId?.toString();
   }
 
+  /** Only IPFS uploads that did not opt out fall back to Cloudinary. */
+  private canFallBack(request: UploadRequest): boolean {
+    return request.storageProvider === 'ipfs' && request.allowFallback !== false;
+  }
+
+  /**
+   * Upload to a single provider and normalise the provider response.
+   * Provider failures are surfaced as StorageError (502).
+   */
+  private async uploadToProvider(provider: StorageProvider, request: UploadRequest): Promise<UploadResult> {
+    try {
+      switch (provider) {
+        case 'cloudinary': {
+          const cloudinaryUpload = await cloudinaryService.uploadBuffer(request.buffer);
+          return {
+            provider: 'cloudinary',
+            url: cloudinaryUpload.secure_url,
+            publicId: cloudinaryUpload.public_id,
+            size: cloudinaryUpload.bytes,
+            mimetype: request.mimetype,
+            uploadedAt: new Date(cloudinaryUpload.created_at),
+          };
+        }
+
+        case 'ipfs': {
+          const ipfsUpload = await ipfsService.upload({
+            content: request.buffer,
+            name: request.originalname,
+            ...(request.metadata ? { metadata: request.metadata } : {}),
+          });
+          return {
+            provider: 'ipfs',
+            url: ipfsUpload.gatewayUrl,
+            cid: ipfsUpload.cid,
+            size: ipfsUpload.size,
+            mimetype: request.mimetype,
+            uploadedAt: new Date(ipfsUpload.timestamp),
+          };
+        }
+
+        default: {
+          // TypeScript exhaustiveness check
+          const _exhaustive: never = provider;
+          throw new StorageError(provider, 'orchestrate', `Unhandled provider: ${_exhaustive}`, 500);
+        }
+      }
+    } catch (error) {
+      if (error instanceof StorageError) {
+        throw error;
+      }
+
+      throw new StorageError(provider, 'orchestrate', `Provider delegation failed: ${errorMessage(error)}`, 502);
+    }
+  }
+
   /**
    * Return an existing record for a deduplicated upload, backfilling the
    * contentHash (legacy records) and asset link when they are missing.
@@ -271,6 +307,7 @@ class StorageOrchestratorService {
       url: record.url,
       cid: record.cid,
       publicId: record.publicId,
+      ...(record.fallbackFrom ? { fallbackFrom: record.fallbackFrom } : {}),
       kind: record.kind,
       assetId: record.assetId?.toString(),
       size: record.size,
