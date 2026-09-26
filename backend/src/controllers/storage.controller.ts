@@ -4,7 +4,6 @@ import mongoose from 'mongoose';
 import { AppError } from '../errors/AppError';
 import Asset from '../models/Asset.model';
 import Manifest from '../models/Manifest.model';
-import { ipfsService } from '../services/ipfs.service';
 import { storageOrchestratorService } from '../services/storage.service';
 import { StorageError, type StorageProvider } from '../types/storage.types';
 
@@ -120,6 +119,10 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
       isEncrypted: false,
     });
 
+    if (uploadResult.recordId) {
+      await storageOrchestratorService.linkAsset(uploadResult.recordId, asset._id.toString());
+    }
+
     res.status(StatusCodes.CREATED).json({
       success: true,
       message: 'Media uploaded successfully',
@@ -127,6 +130,7 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
         assetId: asset._id,
         url: uploadResult.url,
         cid: uploadResult.cid,
+        deduplicated: uploadResult.deduplicated ?? false,
       },
     });
   } catch (error) {
@@ -155,9 +159,17 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
     void ipfsUploadedAt;
 
     const manifestBuffer = Buffer.from(JSON.stringify(manifestPayload), 'utf8');
-    const uploadResult = await ipfsService.upload({
-      content: manifestBuffer,
-      name: `manifest-${manifest._id}.json`,
+    // Link the manifest record to the asset whose media bytes it describes
+    const assetId = await storageOrchestratorService.findAssetIdByContentHash(manifest.contentHash);
+
+    const uploadResult = await storageOrchestratorService.orchestrate({
+      storageProvider: 'ipfs',
+      buffer: manifestBuffer,
+      mimetype: 'application/json',
+      originalname: `manifest-${manifest._id}.json`,
+      userId: manifest.creatorId.toString(),
+      kind: 'manifest',
+      assetId,
       metadata: {
         manifestId: manifest._id.toString(),
         manifestHash: manifest.manifestHash || '',
@@ -165,8 +177,8 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
     });
 
     manifest.ipfsCid = uploadResult.cid;
-    manifest.ipfsUrl = uploadResult.gatewayUrl;
-    manifest.ipfsUploadedAt = new Date(uploadResult.timestamp);
+    manifest.ipfsUrl = uploadResult.url;
+    manifest.ipfsUploadedAt = uploadResult.uploadedAt;
     await manifest.save();
 
     res.status(StatusCodes.OK).json({

@@ -5,22 +5,33 @@
 
 export type StorageProvider = 'cloudinary' | 'ipfs';
 
+/** What a stored object represents: raw media bytes or a provenance manifest */
+export type StorageRecordKind = 'media' | 'manifest';
+
 export interface UploadRequest {
   storageProvider: StorageProvider;
   buffer: Buffer;
   mimetype: string;
   originalname: string;
   userId: string;
+  kind?: StorageRecordKind;            // defaults to 'media'
+  assetId?: string;                    // Asset the stored object belongs to
+  metadata?: Record<string, string>;   // Provider metadata (IPFS pin key-values)
 }
 
 export interface UploadResult {
+  recordId?: string;     // StorageRecord _id (present once persisted)
   provider: StorageProvider;
   url: string;
   cid?: string;          // IPFS only
   publicId?: string;     // Cloudinary only
+  kind?: StorageRecordKind;
+  assetId?: string;
   size: number;
   mimetype: string;
   uploadedAt: Date;
+  /** True when an existing record was reused instead of pinning the bytes again */
+  deduplicated?: boolean;
 }
 
 /**

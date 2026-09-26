@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import { StatusCodes } from 'http-status-codes';
+import mongoose from 'mongoose';
 import {
   UploadRequest,
   UploadResult,
@@ -28,6 +29,14 @@ function sha256Hex(buffer: Buffer): string {
   return createHash('sha256').update(buffer).digest('hex');
 }
 
+function isDuplicateKeyError(error: unknown, fields: string[]): boolean {
+  if (!(error instanceof mongoose.mongo.MongoServerError) || error.code !== 11000) {
+    return false;
+  }
+  const keys = Object.keys(error.keyPattern ?? {});
+  return keys.some((key) => fields.includes(key));
+}
+
 /** Accepts both "sha256:<hex>" and bare "<hex>" forms. */
 function normalizeSha256(hash: string): string {
   return hash.trim().toLowerCase().replace(/^sha256:/, '');
@@ -41,7 +50,13 @@ function normalizeSha256(hash: string): string {
 class StorageOrchestratorService {
   /**
    * Orchestrate the upload based on the requested storage provider
-   * Routes to the appropriate provider, persists result to DB, and returns saved record
+   * Routes to the appropriate provider, persists result to DB, and returns saved record.
+   *
+   * IPFS uploads are content-addressed and deduplicated: if the same bytes
+   * were already pinned, the existing StorageRecord is returned and the
+   * provider is not called again. If the provider returns a CID that already
+   * has a record (legacy record without contentHash, or a concurrent upload),
+   * that record is reused instead of creating a duplicate.
    */
   async orchestrate(request: UploadRequest): Promise<UploadResult> {
     // Validate provider
@@ -53,6 +68,22 @@ class StorageOrchestratorService {
         `Invalid storage provider: ${request.storageProvider}. Supported providers: ${validProviders.join(', ')}`,
         400,
       );
+    }
+
+    if (request.assetId !== undefined && !mongoose.Types.ObjectId.isValid(request.assetId)) {
+      throw new StorageError(request.storageProvider, 'orchestrate', 'Invalid assetId', 400);
+    }
+
+    const contentHash = sha256Hex(request.buffer);
+
+    // Skip the provider entirely when these exact bytes are already pinned
+    if (request.storageProvider === 'ipfs') {
+      const existing = await this.runDbOperation(request.storageProvider, 'dedup-lookup', () =>
+        StorageRecord.findOne({ provider: 'ipfs', contentHash }).sort({ createdAt: 1 }).exec()
+      );
+      if (existing) {
+        return this.reuseRecord(existing, request, contentHash);
+      }
     }
 
     // Delegate to provider
@@ -75,7 +106,8 @@ class StorageOrchestratorService {
         case 'ipfs':
           const ipfsUpload = await ipfsService.upload({
             content: request.buffer,
-            name: request.originalname
+            name: request.originalname,
+            ...(request.metadata ? { metadata: request.metadata } : {}),
           });
           uploadResult = {
             provider: 'ipfs',
@@ -110,14 +142,27 @@ class StorageOrchestratorService {
       );
     }
 
+    // Provider returned a CID we already track: reuse that record
+    const cid = uploadResult.cid;
+    if (cid) {
+      const existing = await this.runDbOperation(request.storageProvider, 'dedup-lookup', () =>
+        StorageRecord.findOne({ cid }).exec()
+      );
+      if (existing) {
+        return this.reuseRecord(existing, request, contentHash);
+      }
+    }
+
     // Persist result to MongoDB
     const storageRecord = new StorageRecord({
       userId: request.userId,
+      assetId: request.assetId,
+      kind: request.kind ?? 'media',
       provider: uploadResult.provider,
       url: uploadResult.url,
-      cid: uploadResult.cid,
+      cid,
       publicId: uploadResult.publicId,
-      contentHash: sha256Hex(request.buffer),
+      contentHash,
       size: uploadResult.size,
       mimetype: uploadResult.mimetype,
       originalFilename: request.originalname,
@@ -129,20 +174,124 @@ class StorageOrchestratorService {
 
       // Return the saved record (not the provider result)
       // Ensures response data always comes from MongoDB
-      return {
-        provider: savedRecord.provider,
-        url: savedRecord.url,
-        cid: savedRecord.cid,
-        publicId: savedRecord.publicId,
-        size: savedRecord.size,
-        mimetype: savedRecord.mimetype,
-        uploadedAt: savedRecord.uploadedAt,
-      };
+      return this.toUploadResult(savedRecord, false);
     } catch (dbError) {
+      // Lost a race with a concurrent upload of the same bytes: the unique
+      // cid (or cid-derived gateway url) index rejected our insert, so
+      // return the record that won.
+      if (cid && isDuplicateKeyError(dbError, ['cid', 'url'])) {
+        const winner = await this.runDbOperation(request.storageProvider, 'dedup-lookup', () =>
+          StorageRecord.findOne({ cid }).exec()
+        );
+        if (winner) {
+          return this.reuseRecord(winner, request, contentHash);
+        }
+      }
+
       throw new StorageError(
         request.storageProvider,
         'persist',
         `Failed to persist upload record to database: ${dbError instanceof Error ? dbError.message : String(dbError)}`,
+        500,
+      );
+    }
+  }
+
+  /**
+   * Link a StorageRecord to the Asset it stores. A record is linked to the
+   * first asset that claims it; later links for deduplicated bytes leave the
+   * original linkage untouched. Returns the record as stored.
+   */
+  async linkAsset(recordId: string, assetId: string): Promise<UploadResult> {
+    if (!mongoose.Types.ObjectId.isValid(recordId) || !mongoose.Types.ObjectId.isValid(assetId)) {
+      throw new AppError('Invalid recordId or assetId', StatusCodes.BAD_REQUEST, 'INVALID_OBJECT_ID');
+    }
+
+    const linked = await StorageRecord.findOneAndUpdate(
+      { _id: recordId, assetId: null },
+      { $set: { assetId } },
+      { new: true }
+    ).exec();
+    const record = linked ?? (await StorageRecord.findById(recordId).exec());
+
+    if (!record) {
+      throw new AppError('Storage record not found', StatusCodes.NOT_FOUND, 'STORAGE_RECORD_NOT_FOUND');
+    }
+
+    return this.toUploadResult(record, false);
+  }
+
+  /**
+   * Find the Asset that owns the given media bytes, if any.
+   * Used to link manifests (which carry the media contentHash) to their asset.
+   */
+  async findAssetIdByContentHash(contentHash: string): Promise<string | undefined> {
+    const record = await StorageRecord.findOne({
+      kind: 'media',
+      contentHash: normalizeSha256(contentHash),
+      assetId: { $ne: null },
+    })
+      .sort({ createdAt: 1 })
+      .select('assetId')
+      .exec();
+
+    return record?.assetId?.toString();
+  }
+
+  /**
+   * Return an existing record for a deduplicated upload, backfilling the
+   * contentHash (legacy records) and asset link when they are missing.
+   */
+  private async reuseRecord(
+    record: IStorageRecord,
+    request: UploadRequest,
+    contentHash: string
+  ): Promise<UploadResult> {
+    const backfill: Partial<Pick<IStorageRecord, 'contentHash' | 'assetId'>> = {};
+    if (!record.contentHash) backfill.contentHash = contentHash;
+    if (!record.assetId && request.assetId) {
+      backfill.assetId = new mongoose.Types.ObjectId(request.assetId);
+    }
+
+    if (Object.keys(backfill).length === 0) {
+      return this.toUploadResult(record, true);
+    }
+
+    const updated = await this.runDbOperation(request.storageProvider, 'persist', () =>
+      StorageRecord.findByIdAndUpdate(record._id, { $set: backfill }, { new: true }).exec()
+    );
+
+    return this.toUploadResult(updated ?? record, true);
+  }
+
+  private toUploadResult(record: IStorageRecord, deduplicated: boolean): UploadResult {
+    return {
+      recordId: String(record._id),
+      provider: record.provider,
+      url: record.url,
+      cid: record.cid,
+      publicId: record.publicId,
+      kind: record.kind,
+      assetId: record.assetId?.toString(),
+      size: record.size,
+      mimetype: record.mimetype,
+      uploadedAt: record.uploadedAt,
+      deduplicated,
+    };
+  }
+
+  private async runDbOperation<T>(
+    provider: StorageProvider,
+    operation: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    try {
+      return await fn();
+    } catch (dbError) {
+      throw new StorageError(
+        provider,
+        operation,
+        `Database operation failed: ${dbError instanceof Error ? dbError.message : String(dbError)}`,
         500,
       );
     }
