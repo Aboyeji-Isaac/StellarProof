@@ -39,6 +39,19 @@ const upload = multer({
  *   - 502: Provider error (upstream failure)
  */
 router.post('/upload', upload.single('file'), uploadFile);
+
+/**
+ * POST /api/v1/storage/media
+ * Upload a media file (defaults to IPFS) and create the linked Asset.
+ * IPFS pins are always requested as CIDv1; the returned IpfsHash is stored
+ * as the Asset's storageReferenceId and returned as `mediaCid`.
+ *
+ * Response:
+ *   - 201: { assetId, storageProvider, storageReferenceId, url, mediaCid, cidVersion }
+ *   - 400: Missing file or invalid userId
+ *   - 401: Authentication required
+ *   - 502: Provider error or non-CIDv1 response
+ */
 router.post('/media', upload.single('file'), uploadMedia);
 router.post('/manifest', uploadManifest);
 
