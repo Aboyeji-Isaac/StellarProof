@@ -21,6 +21,32 @@ function optionalEnv(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
+/**
+ * Ordered list of Soroban RPC endpoints: the required primary followed by
+ * the optional STELLAR_RPC_URL_2 / STELLAR_RPC_URL_3 fallbacks. Blank and
+ * duplicate entries are dropped; malformed URLs abort startup.
+ */
+function rpcUrlList(): string[] {
+  const urls = [
+    requireEnv("STELLAR_RPC_URL"),
+    optionalEnv("STELLAR_RPC_URL_2", ""),
+    optionalEnv("STELLAR_RPC_URL_3", ""),
+  ]
+    .map((url) => url.trim())
+    .filter((url) => url.length > 0);
+
+  for (const url of urls) {
+    try {
+      new URL(url);
+    } catch {
+      console.error(`[Config] Invalid Stellar RPC URL configured: ${url}`);
+      process.exit(1);
+    }
+  }
+
+  return Array.from(new Set(urls));
+}
+
 export const env = {
   NODE_ENV: optionalEnv("NODE_ENV", "development"),
   PORT: parseInt(optionalEnv("PORT", "4000"), 10),
@@ -30,6 +56,22 @@ export const env = {
 
   /** Soroban/Stellar RPC endpoint, e.g. https://soroban-testnet.stellar.org */
   STELLAR_RPC_URL: requireEnv("STELLAR_RPC_URL"),
+
+  /** Optional backup RPC endpoints used when the primary fails. */
+  STELLAR_RPC_URL_2: optionalEnv("STELLAR_RPC_URL_2", ""),
+  STELLAR_RPC_URL_3: optionalEnv("STELLAR_RPC_URL_3", ""),
+
+  /** Primary + backup RPC endpoints in failover order. */
+  STELLAR_RPC_URLS: rpcUrlList(),
+
+  /** Consecutive network failures before an endpoint's circuit opens. */
+  STELLAR_RPC_FAILURE_THRESHOLD: parseInt(optionalEnv("STELLAR_RPC_FAILURE_THRESHOLD", "3"), 10),
+
+  /** How long an open circuit stays open before a half-open trial (ms). */
+  STELLAR_RPC_COOLDOWN_MS: parseInt(optionalEnv("STELLAR_RPC_COOLDOWN_MS", "30000"), 10),
+
+  /** Per-request timeout for RPC calls (ms). */
+  STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "10000"), 10),
 
   /**
    * Network passphrase used when building simulation transactions.
