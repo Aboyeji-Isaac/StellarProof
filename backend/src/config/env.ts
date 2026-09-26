@@ -70,4 +70,17 @@ export const env = {
 
   /** Pinata public gateway base URL */
   PINATA_GATEWAY_URL: optionalEnv("PINATA_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs"),
+
+  /**
+   * Comma-separated storage provider preference used by the failover
+   * registry, most preferred first. Unknown names are ignored and any
+   * supported provider not listed is appended.
+   */
+  STORAGE_PROVIDER_PRIORITY: optionalEnv("STORAGE_PROVIDER_PRIORITY", "ipfs,cloudinary"),
+
+  /** How long a provider health result is trusted before re-checking (ms). */
+  STORAGE_HEALTH_TTL_MS: parseInt(optionalEnv("STORAGE_HEALTH_TTL_MS", "60000"), 10),
+
+  /** Timeout applied to each provider health check (ms). */
+  STORAGE_HEALTH_CHECK_TIMEOUT_MS: parseInt(optionalEnv("STORAGE_HEALTH_CHECK_TIMEOUT_MS", "5000"), 10),
 } as const;
