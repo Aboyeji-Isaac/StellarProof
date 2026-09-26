@@ -11,6 +11,7 @@ export interface UploadRequest {
   mimetype: string;
   originalname: string;
   userId: string;
+  contentHash?: string;  // Verified SHA-256 hex; computed from the buffer when omitted
 }
 
 export interface UploadResult {
@@ -20,7 +21,31 @@ export interface UploadResult {
   publicId?: string;     // Cloudinary only
   size: number;
   mimetype: string;
+  contentHash?: string;  // SHA-256 hex of the stored bytes
   uploadedAt: Date;
+}
+
+/**
+ * Stored upload that already holds the same content hash
+ */
+export interface ExistingStorageRecord {
+  id: string;
+  provider: StorageProvider;
+  url: string;
+  cid?: string;
+  publicId?: string;
+  uploadedAt: Date;
+}
+
+/**
+ * Result of the pre-upload hash-consistency check
+ */
+export interface ContentHashCheckResult {
+  contentHash: string;
+  size: number;
+  matches: true;
+  alreadyStored: boolean;
+  existingRecords: ExistingStorageRecord[];
 }
 
 /**
