@@ -36,7 +36,12 @@ const upload = multer({
  *   - 201: Upload successful with saved record
  *   - 400: Invalid input or provider
  *   - 401: Authentication required
- *   - 502: Provider error (upstream failure)
+ *   - 502: Cloudinary error (requested provider was cloudinary)
+ *   - 503: IPFS failed and the Cloudinary fallback also failed
+ *
+ * When storageProvider is "ipfs" and pinning fails or times out, the file is
+ * stored on Cloudinary instead; the response reports provider,
+ * requestedProvider and fallbackUsed.
  */
 router.post('/upload', upload.single('file'), uploadFile);
 router.post('/media', upload.single('file'), uploadMedia);

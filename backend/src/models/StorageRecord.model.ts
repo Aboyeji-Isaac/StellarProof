@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
-import { StorageProvider, UploadResult } from '../types/storage.types';
+import { StorageProvider } from '../types/storage.types';
 
 /**
  * Storage Record Interface
@@ -16,6 +16,9 @@ export interface IStorageRecord extends Document {
   mimetype: string;          // MIME type (e.g., image/png)
   originalFilename: string;  // Original uploaded filename
   uploadedAt: Date;
+  requestedProvider: StorageProvider; // Provider the client asked for
+  fallbackUsed: boolean;              // True when `provider` differs from `requestedProvider`
+  fallbackReason?: string;            // Why the requested provider failed
   createdAt: Date;
   updatedAt: Date;
 }
@@ -66,6 +69,20 @@ const StorageRecordSchema: Schema = new Schema(
       type: Date,
       default: Date.now,
       required: true,
+    },
+    requestedProvider: {
+      type: String,
+      enum: ['cloudinary', 'ipfs'],
+      required: [true, 'Requested storage provider is required'],
+    },
+    fallbackUsed: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    fallbackReason: {
+      type: String,
+      maxlength: 1000,
     },
   },
   { timestamps: true }

@@ -70,4 +70,10 @@ export const env = {
 
   /** Pinata public gateway base URL */
   PINATA_GATEWAY_URL: optionalEnv("PINATA_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs"),
+
+  /**
+   * Maximum time (ms) the storage orchestrator waits for IPFS pinning before
+   * treating it as failed and falling back to Cloudinary.
+   */
+  IPFS_UPLOAD_TIMEOUT_MS: parseInt(optionalEnv("IPFS_UPLOAD_TIMEOUT_MS", "30000"), 10),
 } as const;
