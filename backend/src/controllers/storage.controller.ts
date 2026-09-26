@@ -3,8 +3,7 @@ import { StatusCodes } from 'http-status-codes';
 import mongoose from 'mongoose';
 import { AppError } from '../errors/AppError';
 import Asset from '../models/Asset.model';
-import Manifest from '../models/Manifest.model';
-import { ipfsService } from '../services/ipfs.service';
+import { manifestService } from '../services/manifest.service';
 import { storageOrchestratorService } from '../services/storage.service';
 import { StorageError, type StorageProvider } from '../types/storage.types';
 
@@ -138,44 +137,21 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
   try {
     const { manifestId } = req.body;
 
-    if (!manifestId || !mongoose.Types.ObjectId.isValid(manifestId)) {
+    if (typeof manifestId !== 'string') {
       throw new AppError('Valid manifestId is required', StatusCodes.BAD_REQUEST, 'INVALID_MANIFEST_ID');
     }
 
-    const manifest = await Manifest.findById(manifestId);
-    if (!manifest) {
-      throw new AppError('Manifest not found', StatusCodes.NOT_FOUND, 'MANIFEST_NOT_FOUND');
-    }
-
-    const manifestObject = manifest.toObject();
-    const { __v, ipfsCid, ipfsUrl, ipfsUploadedAt, ...manifestPayload } = manifestObject as any;
-    void __v;
-    void ipfsCid;
-    void ipfsUrl;
-    void ipfsUploadedAt;
-
-    const manifestBuffer = Buffer.from(JSON.stringify(manifestPayload), 'utf8');
-    const uploadResult = await ipfsService.upload({
-      content: manifestBuffer,
-      name: `manifest-${manifest._id}.json`,
-      metadata: {
-        manifestId: manifest._id.toString(),
-        manifestHash: manifest.manifestHash || '',
-      },
-    });
-
-    manifest.ipfsCid = uploadResult.cid;
-    manifest.ipfsUrl = uploadResult.gatewayUrl;
-    manifest.ipfsUploadedAt = new Date(uploadResult.timestamp);
-    await manifest.save();
+    const result = await manifestService.publishManifestById(manifestId);
 
     res.status(StatusCodes.OK).json({
       success: true,
       message: 'Manifest uploaded to IPFS successfully',
       data: {
-        manifestId: manifest._id,
-        cid: manifest.ipfsCid,
-        url: manifest.ipfsUrl,
+        manifestId: result.manifestId,
+        manifestHash: result.manifestHash,
+        manifestCid: result.manifestCid,
+        cid: result.manifestCid,
+        url: result.ipfsUrl,
       },
     });
   } catch (error) {
