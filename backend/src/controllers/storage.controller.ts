@@ -182,3 +182,16 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
     next(error);
   }
 };
+
+export const resolveCid = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await storageOrchestratorService.resolveCid(req.params.cid);
+
+    res.status(StatusCodes.OK).json({
+      success: true,
+      data: result,
+    });
+  } catch (error) {
+    next(error);
+  }
+};

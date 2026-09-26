@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { uploadFile, uploadManifest, uploadMedia } from '../../controllers/storage.controller';
+import { resolveCid, uploadFile, uploadManifest, uploadMedia } from '../../controllers/storage.controller';
 
 /**
  * Storage Routes - v1
@@ -41,5 +41,17 @@ const upload = multer({
 router.post('/upload', upload.single('file'), uploadFile);
 router.post('/media', upload.single('file'), uploadMedia);
 router.post('/manifest', uploadManifest);
+
+/**
+ * GET /api/v1/storage/resolve/:cid
+ * Check that a stored CID resolves on the IPFS gateway and that its bytes
+ * match the SHA-256 recorded at upload time.
+ *
+ * Response:
+ *   - 200: { available, size, hashMatches, expectedSize, gatewayStatus, cid, checkedAt }
+ *   - 400: Malformed CID
+ *   - 404: CID has no storage record
+ */
+router.get('/resolve/:cid', resolveCid);
 
 export default router;

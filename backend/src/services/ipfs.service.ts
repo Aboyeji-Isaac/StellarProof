@@ -1,8 +1,10 @@
+import { createHash } from "crypto";
 import { PinataSDK } from "pinata";
 import { StatusCodes } from "http-status-codes";
 import { env } from "../config/env";
 import { AppError } from "../errors/AppError";
 import type { IpfsUploadInput, IpfsUploadResult } from "../types/ipfs.types";
+import type { GatewayFetchOptions, GatewayFetchResult } from "../types/storage.types";
 
 class IpfsService {
   private readonly pinata: PinataSDK;
@@ -58,6 +60,74 @@ class IpfsService {
         StatusCodes.BAD_GATEWAY,
         "IPFS_UPLOAD_FAILED"
       );
+    }
+  }
+
+  /** Public gateway URL for a CID. */
+  getGatewayUrl(cid: string): string {
+    return `${env.PINATA_GATEWAY_URL.replace(/\/+$/, "")}/${cid}`;
+  }
+
+  /**
+   * Stream a CID from the Pinata gateway and compute its SHA-256.
+   * The whole request (headers + body) is bounded by `timeoutMs`, and the
+   * download is aborted as soon as it exceeds `maxBytes`, so a slow gateway
+   * or an oversized object can never stall or exhaust the API process.
+   * Gateway-side failures are reported as a status rather than thrown.
+   */
+  async fetchFromGateway(cid: string, options: GatewayFetchOptions): Promise<GatewayFetchResult> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+
+    try {
+      const response = await fetch(this.getGatewayUrl(cid), {
+        method: "GET",
+        signal: controller.signal,
+        redirect: "follow",
+      });
+
+      if (response.status === StatusCodes.NOT_FOUND || response.status === StatusCodes.GONE) {
+        await response.body?.cancel();
+        return { status: "not_found", httpStatus: response.status };
+      }
+
+      if (!response.ok || !response.body) {
+        await response.body?.cancel();
+        return { status: "unreachable", httpStatus: response.status };
+      }
+
+      const lengthHeader = response.headers.get("content-length");
+      const declaredSize = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
+
+      if (declaredSize !== null && declaredSize > options.maxBytes) {
+        await response.body.cancel();
+        return { status: "too_large", declaredSize };
+      }
+
+      const hash = createHash("sha256");
+      const reader = response.body.getReader();
+      let received = 0;
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        received += value.byteLength;
+        if (received > options.maxBytes) {
+          await reader.cancel();
+          return { status: "too_large", declaredSize };
+        }
+        hash.update(value);
+      }
+
+      return { status: "ok", size: received, sha256: hash.digest("hex") };
+    } catch {
+      if (controller.signal.aborted) {
+        return { status: "timeout" };
+      }
+      return { status: "unreachable" };
+    } finally {
+      clearTimeout(timer);
     }
   }
 }
