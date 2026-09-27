@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import multer from 'multer';
 import { uploadFile, uploadManifest, uploadMedia } from '../../controllers/storage.controller';
+import { getProviderHealth, refreshProviderHealth } from '../../controllers/storageHealth.controller';
+import { verifyJWT } from '../../middlewares/jwt.middleware';
 
 /**
  * Storage Routes - v1
@@ -54,5 +56,16 @@ router.post('/upload', upload.single('file'), uploadFile);
  */
 router.post('/media', upload.single('file'), uploadMedia);
 router.post('/manifest', uploadManifest);
+
+/**
+ * GET /api/v1/storage/providers/health
+ * Ranked storage provider list (healthy first, then configured priority)
+ * read from MongoDB. Stale entries are re-checked before responding.
+ *
+ * POST /api/v1/storage/providers/health/refresh
+ * Forces an immediate health check of Pinata and Cloudinary (JWT required).
+ */
+router.get('/providers/health', getProviderHealth);
+router.post('/providers/health/refresh', verifyJWT, refreshProviderHealth);
 
 export default router;

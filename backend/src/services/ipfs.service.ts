@@ -81,6 +81,15 @@ class IpfsService {
       );
     }
   }
+
+  /**
+   * Lightweight liveness probe against the Pinata pins (files) API.
+   * Lists a single public file, which exercises authentication and the API
+   * without transferring content. Throws if Pinata is unreachable.
+   */
+  async healthCheck(): Promise<void> {
+    await this.pinata.files.public.list().limit(1);
+  }
 }
 
 export const ipfsService = new IpfsService();

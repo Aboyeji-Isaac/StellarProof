@@ -59,6 +59,22 @@ class CloudinaryService {
       uploadStream.end(buffer);
     });
   }
+
+  /**
+   * Liveness probe using the Cloudinary Admin API ping endpoint.
+   * Throws if Cloudinary is not configured or unreachable.
+   */
+  async ping(): Promise<void> {
+    const { cloud_name, api_key, api_secret } = cloudinary.config();
+    if (!cloud_name || !api_key || !api_secret) {
+      throw new Error("Cloudinary is not configured");
+    }
+
+    const response = await cloudinary.api.ping();
+    if (response?.status !== "ok") {
+      throw new Error(`Unexpected Cloudinary ping status: ${String(response?.status)}`);
+    }
+  }
 }
 
 export const cloudinaryService = new CloudinaryService();
