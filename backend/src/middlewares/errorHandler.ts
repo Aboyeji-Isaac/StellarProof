@@ -2,6 +2,7 @@ import type { ErrorRequestHandler } from "express";
 import { StatusCodes } from "http-status-codes";
 import { Error as MongooseError, mongo } from "mongoose";
 import { AppError } from "../errors/AppError";
+import { StorageError } from "../types/storage.types";
 import { env } from "../config/env";
 
 export const globalErrorHandler: ErrorRequestHandler = (
@@ -16,6 +17,17 @@ export const globalErrorHandler: ErrorRequestHandler = (
       success: false,
       error: err.message,
       ...(err.code ? { code: err.code } : {}),
+    });
+    return;
+  }
+
+  if (err instanceof StorageError) {
+    res.status(err.statusCode).json({
+      success: false,
+      error: err.message,
+      code: "STORAGE_ERROR",
+      provider: err.provider,
+      operation: err.operation,
     });
     return;
   }

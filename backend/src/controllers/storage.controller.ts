@@ -168,6 +168,8 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
       userId: manifest.creatorId.toString(),
       kind: 'manifest',
       assetId,
+      // Manifests are content-addressed on IPFS; never fall back
+      allowFallback: false,
       metadata: {
         manifestId: manifest._id.toString(),
         manifestHash: manifest.manifestHash || '',
