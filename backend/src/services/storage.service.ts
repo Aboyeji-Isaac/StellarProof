@@ -104,7 +104,6 @@ class StorageOrchestratorService {
       if (!this.canFallBack(request)) {
         throw primaryError;
       }
-    }
 
       const primaryReason = errorMessage(primaryError);
       logger.warn('IPFS upload failed; falling back to Cloudinary', {
