@@ -21,6 +21,17 @@ function optionalEnv(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
+function optionalPositiveIntEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    console.error(`[Config] ${key} must be a positive integer, got "${raw}"`);
+    process.exit(1);
+  }
+  return value;
+}
+
 export const env = {
   NODE_ENV: optionalEnv("NODE_ENV", "development"),
   PORT: parseInt(optionalEnv("PORT", "4000"), 10),
@@ -30,6 +41,22 @@ export const env = {
 
   /** Soroban/Stellar RPC endpoint, e.g. https://soroban-testnet.stellar.org */
   STELLAR_RPC_URL: requireEnv("STELLAR_RPC_URL"),
+
+  /** Optional backup RPC endpoints used when the primary fails. */
+  STELLAR_RPC_URL_2: optionalEnv("STELLAR_RPC_URL_2", ""),
+  STELLAR_RPC_URL_3: optionalEnv("STELLAR_RPC_URL_3", ""),
+
+  /** Primary + backup RPC endpoints in failover order. */
+  STELLAR_RPC_URLS: rpcUrlList(),
+
+  /** Consecutive network failures before an endpoint's circuit opens. */
+  STELLAR_RPC_FAILURE_THRESHOLD: parseInt(optionalEnv("STELLAR_RPC_FAILURE_THRESHOLD", "3"), 10),
+
+  /** How long an open circuit stays open before a half-open trial (ms). */
+  STELLAR_RPC_COOLDOWN_MS: parseInt(optionalEnv("STELLAR_RPC_COOLDOWN_MS", "30000"), 10),
+
+  /** Per-request timeout for RPC calls (ms). */
+  STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "10000"), 10),
 
   /**
    * Network passphrase used when building simulation transactions.
@@ -73,4 +100,10 @@ export const env = {
 
   /** Pinata public gateway base URL */
   PINATA_GATEWAY_URL: optionalEnv("PINATA_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs"),
+
+  /** Max time (ms) to wait for the IPFS gateway when resolving a CID */
+  IPFS_RESOLVE_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_RESOLVE_TIMEOUT_MS", 15_000),
+
+  /** Max bytes downloaded from the IPFS gateway when resolving a CID (defaults to the 100 MB upload limit) */
+  IPFS_RESOLVE_MAX_BYTES: optionalPositiveIntEnv("IPFS_RESOLVE_MAX_BYTES", 100 * 1024 * 1024),
 } as const;
