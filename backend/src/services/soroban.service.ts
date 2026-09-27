@@ -1,288 +1,274 @@
-import { rpc } from '@stellar/stellar-sdk';
-import { StatusCodes } from 'http-status-codes';
-import { env } from '../config/env';
-import { AppError } from '../errors/AppError';
-import RpcFailoverEvent from '../models/RpcFailoverEvent.model';
-import logger from '../utils/logger';
-import type {
-  RpcCircuitState,
-  RpcEndpointStatus,
-  RpcFailoverEventInput,
-  RpcFailoverOptions,
-  RpcNetworkStatus,
-} from '../types/soroban.types';
-
-/** Transport-level error codes that indicate the endpoint, not the request, failed. */
-const NETWORK_ERROR_CODES = new Set([
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'ECONNABORTED',
-  'ETIMEDOUT',
-  'ENOTFOUND',
-  'EAI_AGAIN',
-  'EHOSTUNREACH',
-  'ENETUNREACH',
-  'EPIPE',
-  'ERR_NETWORK',
-  'ERR_BAD_RESPONSE',
-]);
-
-interface TransportErrorLike {
-  code?: unknown;
-  message?: unknown;
-  isAxiosError?: unknown;
-  response?: { status?: unknown };
-}
+import {
+  Account,
+  FeeBumpTransaction,
+  StrKey,
+  Transaction,
+  rpc,
+} from "@stellar/stellar-sdk";
+import { StatusCodes } from "http-status-codes";
+import { env } from "../config/env";
+import { AppError } from "../errors/AppError";
+import logger from "../utils/logger";
 
 /**
- * Returns true when an error means the RPC endpoint itself is unavailable
- * (connection failure, timeout, 5xx, 429). JSON-RPC errors such as a failed
- * simulation are request-level and must not trigger a failover.
+ * Soroban RPC Service
+ *
+ * Single entry point for every on-chain interaction. Wraps
+ * `@stellar/stellar-sdk`'s `rpc.Server`, reads its configuration from
+ * `config/env`, bounds every call with a timeout and converts RPC failures
+ * into typed `AppError`s, so controllers never handle raw RPC internals.
  */
-export function isRpcNetworkError(error: unknown): boolean {
-  if (!error || typeof error !== 'object') return false;
-  const err = error as TransportErrorLike;
 
-  if (typeof err.code === 'string' && NETWORK_ERROR_CODES.has(err.code)) return true;
+export type SorobanOperation =
+  | "loadAccount"
+  | "getEvents"
+  | "simulate"
+  | "sendTransaction"
+  | "getTransaction";
 
-  const status = err.response?.status;
-  if (typeof status === 'number') return status >= 500 || status === 429;
+export type SorobanTransaction = Transaction | FeeBumpTransaction;
 
-  // Axios error with no response at all: the request never completed.
-  return err.isAxiosError === true && err.response === undefined;
+export type SimulationResult =
+  | rpc.Api.SimulateTransactionSuccessResponse
+  | rpc.Api.SimulateTransactionRestoreResponse;
+
+/** Accepted submissions: queued for inclusion or already known to the network */
+export type SubmittedTransaction = rpc.Api.SendTransactionResponse & {
+  status: "PENDING" | "DUPLICATE";
+};
+
+export interface SorobanServiceConfig {
+  rpcUrl: string;
+  networkPassphrase: string;
+  timeoutMs: number;
+  allowHttp: boolean;
 }
 
-/** Origin-only form of an endpoint so credentials in paths/queries are never logged. */
-export function redactEndpoint(url: string): string {
-  try {
-    return new URL(url).origin;
-  } catch {
-    return '[invalid-url]';
+/** Error object thrown by the SDK for JSON-RPC errors and missing ledger entries */
+interface RpcErrorPayload {
+  code: number;
+  message: string;
+  data?: unknown;
+}
+
+/** Subset of an axios error the SDK surfaces for transport failures */
+interface HttpTransportError {
+  isAxiosError: true;
+  code?: string;
+  message: string;
+  response?: { status: number };
+}
+
+const TRANSACTION_HASH_PATTERN = /^[0-9a-f]{64}$/i;
+
+const JSON_RPC_INVALID_REQUEST = -32600;
+const JSON_RPC_INVALID_PARAMS = -32602;
+
+class SorobanRpcTimeoutError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`timed out after ${timeoutMs}ms`);
+    this.name = "SorobanRpcTimeoutError";
   }
 }
 
-function describeError(error: unknown): { reason: string; errorCode?: string } {
-  const err = (error ?? {}) as TransportErrorLike;
-  const status = err.response?.status;
-  const reason = error instanceof Error ? error.message : typeof err.message === 'string' ? err.message : String(error);
-  const errorCode = typeof err.code === 'string' ? err.code : typeof status === 'number' ? `HTTP_${status}` : undefined;
-  return { reason: reason.slice(0, 1000), errorCode };
+function isRpcErrorPayload(error: unknown): error is RpcErrorPayload {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    !(error instanceof Error) &&
+    typeof (error as RpcErrorPayload).code === "number" &&
+    typeof (error as RpcErrorPayload).message === "string"
+  );
 }
 
-interface EndpointState {
-  url: string;
-  label: string;
-  server: rpc.Server;
-  consecutiveFailures: number;
-  openedAt?: number;
-  lastError?: string;
+function isHttpTransportError(error: unknown): error is HttpTransportError {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as HttpTransportError).isAxiosError === true
+  );
 }
 
-/**
- * Multi-endpoint Soroban RPC client with a per-endpoint circuit breaker.
- *
- * Calls go to the highest-priority endpoint whose circuit is not open. On a
- * network-level failure the call is retried on the next endpoint and a
- * failover event is logged and persisted. After `failureThreshold`
- * consecutive failures an endpoint's circuit opens for `cooldownMs`; the
- * first call after the cooldown is a half-open trial that either closes the
- * circuit or re-opens it.
- */
-export class RpcFailover {
-  private readonly endpoints: EndpointState[];
+export function defaultSorobanConfig(): SorobanServiceConfig {
+  return {
+    rpcUrl: env.STELLAR_RPC_URL,
+    networkPassphrase: env.STELLAR_NETWORK_PASSPHRASE,
+    timeoutMs: env.STELLAR_RPC_TIMEOUT_MS,
+    // Plain-http RPC (local quickstart node) is never allowed in production
+    allowHttp: env.NODE_ENV !== "production" && env.STELLAR_RPC_URL.startsWith("http://"),
+  };
+}
 
-  constructor(
-    urls: string[],
-    private readonly options: RpcFailoverOptions,
-    serverFactory: (url: string) => rpc.Server = (url) =>
-      new rpc.Server(url, { allowHttp: options.allowHttp, timeout: options.timeoutMs }),
-  ) {
-    this.endpoints = [];
-    for (const url of urls) {
-      try {
-        this.endpoints.push({ url, label: redactEndpoint(url), server: serverFactory(url), consecutiveFailures: 0 });
-      } catch (error) {
-        logger.error('Skipping unusable Stellar RPC endpoint', {
-          endpoint: redactEndpoint(url),
-          error: describeError(error).reason,
-        });
-      }
+export class SorobanService {
+  private readonly server: rpc.Server;
+  private readonly timeoutMs: number;
+  readonly networkPassphrase: string;
+
+  constructor(config: SorobanServiceConfig = defaultSorobanConfig(), server?: rpc.Server) {
+    if (!Number.isInteger(config.timeoutMs) || config.timeoutMs <= 0) {
+      throw new Error(`[Config] STELLAR_RPC_TIMEOUT_MS must be a positive integer, got ${config.timeoutMs}`);
     }
 
-    if (this.endpoints.length === 0) {
-      throw new Error('No usable Stellar RPC endpoints configured');
-    }
+    this.server = server ?? new rpc.Server(config.rpcUrl, { allowHttp: config.allowHttp });
+    this.timeoutMs = config.timeoutMs;
+    this.networkPassphrase = config.networkPassphrase;
   }
 
   /**
-   * Runs an RPC operation with failover across the configured endpoints.
+   * Load an account with its current sequence number, ready for
+   * `TransactionBuilder`.
    */
-  async execute<T>(operation: string, call: (server: rpc.Server) => Promise<T>): Promise<T> {
-    const candidates = this.endpoints.filter((endpoint) => this.stateOf(endpoint) !== 'open');
+  async loadAccount(publicKey: string): Promise<Account> {
+    if (!StrKey.isValidEd25519PublicKey(publicKey)) {
+      throw new AppError("Invalid Stellar account address", StatusCodes.BAD_REQUEST, "INVALID_STELLAR_ADDRESS");
+    }
 
-    if (candidates.length === 0) {
-      logger.error('All Stellar RPC circuits are open', { event: 'rpc_unavailable', operation });
+    try {
+      return await this.call("loadAccount", () => this.server.getAccount(publicKey));
+    } catch (error) {
+      if (error instanceof AppError && error.statusCode === StatusCodes.NOT_FOUND) {
+        throw new AppError(
+          `Stellar account not found: ${publicKey}`,
+          StatusCodes.NOT_FOUND,
+          "STELLAR_ACCOUNT_NOT_FOUND"
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** Fetch contract / system / diagnostic events. */
+  async getEvents(request: rpc.Server.GetEventsRequest): Promise<rpc.Api.GetEventsResponse> {
+    return this.call("getEvents", () => this.server.getEvents(request));
+  }
+
+  /**
+   * Simulate a transaction. Simulation errors (contract traps, invalid
+   * arguments) are raised as 422 so callers never submit a failing tx.
+   */
+  async simulate(transaction: SorobanTransaction): Promise<SimulationResult> {
+    const response = await this.call("simulate", () => this.server.simulateTransaction(transaction));
+
+    if (rpc.Api.isSimulationError(response)) {
       throw new AppError(
-        'All Stellar RPC endpoints are temporarily unavailable',
-        StatusCodes.SERVICE_UNAVAILABLE,
-        'RPC_UNAVAILABLE',
+        `Soroban simulation failed: ${response.error}`,
+        StatusCodes.UNPROCESSABLE_ENTITY,
+        "SOROBAN_SIMULATION_FAILED"
       );
     }
 
-    let lastError: unknown;
-    for (let i = 0; i < candidates.length; i++) {
-      const endpoint = candidates[i];
-      try {
-        const result = await call(endpoint.server);
-        this.recordSuccess(endpoint);
-        return result;
-      } catch (error) {
-        if (!isRpcNetworkError(error)) {
-          // Request-level error (bad params, failed simulation, ...): the
-          // endpoint is healthy, so surface it without rotating.
-          this.recordSuccess(endpoint);
-          throw error;
-        }
+    return response;
+  }
 
-        lastError = error;
-        const circuitOpened = this.recordFailure(endpoint, error);
-        const next = candidates[i + 1];
-        const { reason, errorCode } = describeError(error);
+  /**
+   * Submit a signed transaction. Only PENDING and DUPLICATE are returned;
+   * rejected submissions become 422 and back-pressure becomes 503.
+   */
+  async sendTransaction(transaction: SorobanTransaction): Promise<SubmittedTransaction> {
+    const response = await this.call("sendTransaction", () => this.server.sendTransaction(transaction));
 
-        this.logFailover({
-          operation,
-          fromEndpoint: endpoint.label,
-          toEndpoint: next?.label,
-          reason,
-          errorCode,
-          circuitOpened,
-        });
+    switch (response.status) {
+      case "PENDING":
+      case "DUPLICATE":
+        return response as SubmittedTransaction;
+
+      case "TRY_AGAIN_LATER":
+        throw new AppError(
+          "Soroban RPC is congested; retry the submission later",
+          StatusCodes.SERVICE_UNAVAILABLE,
+          "SOROBAN_TRY_AGAIN_LATER"
+        );
+
+      case "ERROR": {
+        const resultCode = response.errorResult?.result().switch().name ?? "unknown";
+        throw new AppError(
+          `Soroban transaction ${response.hash} rejected: ${resultCode}`,
+          StatusCodes.UNPROCESSABLE_ENTITY,
+          "SOROBAN_TRANSACTION_REJECTED"
+        );
+      }
+
+      default: {
+        const unexpected: never = response.status;
+        throw new AppError(
+          `Unexpected sendTransaction status: ${String(unexpected)}`,
+          StatusCodes.BAD_GATEWAY,
+          "SOROBAN_RPC_ERROR"
+        );
       }
     }
-
-    throw new AppError(
-      `All Stellar RPC endpoints failed for ${operation}: ${describeError(lastError).reason}`,
-      StatusCodes.BAD_GATEWAY,
-      'RPC_ALL_ENDPOINTS_FAILED',
-    );
-  }
-
-  /** Current circuit state of every endpoint, in failover order. */
-  getEndpointStatuses(): RpcEndpointStatus[] {
-    return this.endpoints.map((endpoint, index) => {
-      const state = this.stateOf(endpoint);
-      return {
-        priority: index + 1,
-        endpoint: endpoint.label,
-        state,
-        consecutiveFailures: endpoint.consecutiveFailures,
-        openedAt: endpoint.openedAt !== undefined ? new Date(endpoint.openedAt) : undefined,
-        retryAt:
-          endpoint.openedAt !== undefined ? new Date(endpoint.openedAt + this.options.cooldownMs) : undefined,
-        lastError: endpoint.lastError,
-      };
-    });
-  }
-
-  /** Redacted endpoint the next call will use, or null if all circuits are open. */
-  getActiveEndpoint(): string | null {
-    return this.endpoints.find((endpoint) => this.stateOf(endpoint) !== 'open')?.label ?? null;
-  }
-
-  private stateOf(endpoint: EndpointState): RpcCircuitState {
-    if (endpoint.openedAt === undefined) return 'closed';
-    return Date.now() - endpoint.openedAt >= this.options.cooldownMs ? 'half_open' : 'open';
-  }
-
-  private recordSuccess(endpoint: EndpointState): void {
-    if (endpoint.openedAt !== undefined) {
-      logger.info('Stellar RPC circuit closed', { event: 'rpc_circuit_closed', endpoint: endpoint.label });
-    }
-    endpoint.consecutiveFailures = 0;
-    endpoint.openedAt = undefined;
-    endpoint.lastError = undefined;
-  }
-
-  /** Returns true when this failure opened (or re-opened) the circuit. */
-  private recordFailure(endpoint: EndpointState, error: unknown): boolean {
-    const wasHalfOpen = this.stateOf(endpoint) === 'half_open';
-    endpoint.consecutiveFailures += 1;
-    endpoint.lastError = describeError(error).reason;
-
-    if (wasHalfOpen || endpoint.consecutiveFailures >= this.options.failureThreshold) {
-      endpoint.openedAt = Date.now();
-      logger.warn('Stellar RPC circuit opened', {
-        event: 'rpc_circuit_opened',
-        endpoint: endpoint.label,
-        consecutiveFailures: endpoint.consecutiveFailures,
-        cooldownMs: this.options.cooldownMs,
-      });
-      return true;
-    }
-    return false;
-  }
-
-  private logFailover(event: RpcFailoverEventInput): void {
-    logger.warn('Stellar RPC failover', { event: 'rpc_failover', ...event });
-
-    // Persisting the audit record must never delay or break the RPC call.
-    RpcFailoverEvent.create({ ...event, occurredAt: new Date() }).catch((error: unknown) => {
-      logger.error('Failed to persist RPC failover event', { error: describeError(error).reason });
-    });
-  }
-}
-
-class SorobanService {
-  private failover: RpcFailover | null = null;
-
-  /** Shared failover-aware RPC client, created on first use. */
-  get rpc(): RpcFailover {
-    if (!this.failover) {
-      this.failover = new RpcFailover(env.STELLAR_RPC_URLS, {
-        failureThreshold: env.STELLAR_RPC_FAILURE_THRESHOLD,
-        cooldownMs: env.STELLAR_RPC_COOLDOWN_MS,
-        timeoutMs: env.STELLAR_RPC_TIMEOUT_MS,
-        allowHttp: env.NODE_ENV !== 'production',
-      });
-    }
-    return this.failover;
   }
 
   /**
-   * Runs any Soroban RPC call with transparent endpoint failover.
-   * e.g. `sorobanService.execute('simulateTransaction', (s) => s.simulateTransaction(tx))`
+   * Look up a transaction by hash. NOT_FOUND is a normal status (not yet
+   * ingested or outside retention) and is returned rather than thrown.
    */
-  execute<T>(operation: string, call: (server: rpc.Server) => Promise<T>): Promise<T> {
-    return this.rpc.execute(operation, call);
+  async getTransaction(hash: string): Promise<rpc.Api.GetTransactionResponse> {
+    if (!TRANSACTION_HASH_PATTERN.test(hash)) {
+      throw new AppError("Invalid transaction hash", StatusCodes.BAD_REQUEST, "INVALID_TRANSACTION_HASH");
+    }
+
+    return this.call("getTransaction", () => this.server.getTransaction(hash.toLowerCase()));
   }
 
-  async getLatestLedger(): Promise<rpc.Api.GetLatestLedgerResponse> {
-    return this.execute('getLatestLedger', (server) => server.getLatestLedger());
+  /** Run an RPC call with the configured timeout and map failures to AppError. */
+  private async call<T>(operation: SorobanOperation, fn: () => Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new SorobanRpcTimeoutError(this.timeoutMs)), this.timeoutMs);
+    });
+
+    try {
+      return await Promise.race([fn(), timeout]);
+    } catch (error) {
+      throw this.toAppError(operation, error);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
-  /**
-   * Live network status: latest ledger (fetched through failover), circuit
-   * state of each endpoint, and the most recent failover events from MongoDB.
-   */
-  async getNetworkStatus(recentLimit = 20): Promise<RpcNetworkStatus> {
-    const [latestLedger, recentFailovers] = await Promise.all([
-      this.getLatestLedger(),
-      RpcFailoverEvent.find({}, { _id: 0, __v: 0 })
-        .sort({ occurredAt: -1 })
-        .limit(recentLimit)
-        .lean<RpcNetworkStatus['recentFailovers']>(),
-    ]);
+  private toAppError(operation: SorobanOperation, error: unknown): AppError {
+    if (error instanceof AppError) {
+      return error;
+    }
 
-    return {
-      activeEndpoint: this.rpc.getActiveEndpoint(),
-      latestLedger: {
-        sequence: latestLedger.sequence,
-        protocolVersion: latestLedger.protocolVersion,
-        id: latestLedger.id,
-      },
-      endpoints: this.rpc.getEndpointStatuses(),
-      recentFailovers,
-    };
+    const prefix = `Soroban RPC ${operation} failed`;
+
+    if (error instanceof SorobanRpcTimeoutError) {
+      logger.warn(prefix, { operation, reason: error.message });
+      return new AppError(`${prefix}: ${error.message}`, StatusCodes.GATEWAY_TIMEOUT, "SOROBAN_RPC_TIMEOUT");
+    }
+
+    if (isRpcErrorPayload(error)) {
+      if (error.code === StatusCodes.NOT_FOUND) {
+        return new AppError(`${prefix}: ${error.message}`, StatusCodes.NOT_FOUND, "SOROBAN_NOT_FOUND");
+      }
+      if (error.code === JSON_RPC_INVALID_PARAMS || error.code === JSON_RPC_INVALID_REQUEST) {
+        return new AppError(`${prefix}: ${error.message}`, StatusCodes.BAD_REQUEST, "SOROBAN_INVALID_REQUEST");
+      }
+      logger.warn(prefix, { operation, rpcCode: error.code, reason: error.message });
+      return new AppError(`${prefix}: ${error.message}`, StatusCodes.BAD_GATEWAY, "SOROBAN_RPC_ERROR");
+    }
+
+    if (isHttpTransportError(error)) {
+      const status = error.response?.status;
+      logger.warn(prefix, { operation, httpStatus: status, code: error.code, reason: error.message });
+
+      if (status === StatusCodes.TOO_MANY_REQUESTS) {
+        return new AppError(`${prefix}: rate limited`, StatusCodes.TOO_MANY_REQUESTS, "SOROBAN_RPC_RATE_LIMITED");
+      }
+      if (status === undefined) {
+        const timedOut = error.code === "ECONNABORTED" || error.code === "ETIMEDOUT";
+        return timedOut
+          ? new AppError(`${prefix}: ${error.message}`, StatusCodes.GATEWAY_TIMEOUT, "SOROBAN_RPC_TIMEOUT")
+          : new AppError(`${prefix}: ${error.message}`, StatusCodes.SERVICE_UNAVAILABLE, "SOROBAN_RPC_UNREACHABLE");
+      }
+      return new AppError(`${prefix}: HTTP ${status}`, StatusCodes.BAD_GATEWAY, "SOROBAN_RPC_UNAVAILABLE");
+    }
+
+    const reason = error instanceof Error ? error.message : String(error);
+    logger.warn(prefix, { operation, reason });
+    return new AppError(`${prefix}: ${reason}`, StatusCodes.BAD_GATEWAY, "SOROBAN_RPC_ERROR");
   }
 }
 

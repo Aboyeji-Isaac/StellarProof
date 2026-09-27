@@ -1,423 +1,289 @@
-import crypto from "crypto";
-import {
-  Account,
-  Keypair,
-  Networks,
-  SorobanDataBuilder,
-  StrKey,
-  Transaction,
-  rpc,
-  xdr,
-} from "@stellar/stellar-sdk";
-
-jest.mock("../config/env", () => ({
+/**
+ * SorobanService unit tests.
+ *
+ * The RPC transport is replaced by a stub `rpc.Server` injected through the
+ * constructor; transactions, accounts and XDR results are real SDK objects.
+ */
+jest.mock('../config/env', () => ({
+  __esModule: true,
   env: {
-    STELLAR_RPC_URL: "https://rpc.invalid",
-    STELLAR_NETWORK_PASSPHRASE: "Test SDF Network ; September 2015",
-    STELLAR_TX_POLL_INTERVAL_MS: 1_000,
-    STELLAR_TX_CONFIRMATION_TIMEOUT_MS: 60_000,
-    STELLAR_TX_MAX_CONSECUTIVE_RPC_ERRORS: 3,
+    NODE_ENV: 'test',
+    STELLAR_RPC_URL: 'https://soroban-testnet.stellar.org',
+    STELLAR_NETWORK_PASSPHRASE: 'Test SDF Network ; September 2015',
+    STELLAR_RPC_TIMEOUT_MS: 30000,
   },
 }));
-jest.mock("../utils/logger", () => ({
+
+jest.mock('../utils/logger', () => ({
   __esModule: true,
-  default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+  default: { warn: jest.fn(), error: jest.fn(), info: jest.fn(), debug: jest.fn() },
 }));
 
 import {
-  SorobanService,
-  extractFailureDiagnostics,
-  type Clock,
-  type SorobanRpcClient,
-} from "../services/soroban.service";
-import {
-  SorobanRpcError,
-  TransactionConfirmationTimeoutError,
-  TransactionFailedError,
-  TransactionSimulationError,
-  TransactionSubmissionError,
-} from "../errors/SorobanTransactionError";
-import type { SignedContractTransaction } from "../utils/transactionBuilder";
+  Account,
+  BASE_FEE,
+  Keypair,
+  Networks,
+  Operation,
+  TransactionBuilder,
+  rpc,
+  xdr,
+} from '@stellar/stellar-sdk';
+import { AppError } from '../errors/AppError';
+import { SorobanService, defaultSorobanConfig, sorobanService } from '../services/soroban.service';
 
-const { GetTransactionStatus } = rpc.Api;
-const TX_HASH = crypto.randomBytes(32).toString("hex");
-const DEFAULTS = { pollIntervalMs: 1_000, timeoutMs: 60_000, maxConsecutiveRpcErrors: 3 };
-
-/** Virtual clock: sleeping advances time instantly. */
-function virtualClock(): Clock & { sleeps: number[] } {
-  let now = 0;
-  const sleeps: number[] = [];
-  return {
-    sleeps,
-    now: () => now,
-    sleep: async (ms: number) => {
-      sleeps.push(ms);
-      now += ms;
-    },
-  };
-}
-
-function rpcClient(): jest.Mocked<SorobanRpcClient> {
-  return {
-    getAccount: jest.fn(),
-    simulateTransaction: jest.fn(),
-    getTransaction: jest.fn(),
-    sendTransaction: jest.fn(),
-  };
-}
-
-const ledgerInfo = {
-  txHash: TX_HASH,
-  latestLedger: 100,
-  latestLedgerCloseTime: 0,
-  oldestLedger: 1,
-  oldestLedgerCloseTime: 0,
+type RpcStub = {
+  getAccount: jest.Mock;
+  getEvents: jest.Mock;
+  simulateTransaction: jest.Mock;
+  sendTransaction: jest.Mock;
+  getTransaction: jest.Mock;
 };
 
-function notFound(): rpc.Api.GetTransactionResponse {
-  return { ...ledgerInfo, status: GetTransactionStatus.NOT_FOUND };
+const source = Keypair.random();
+const TX_HASH = 'a'.repeat(64);
+
+function buildStub(): RpcStub {
+  return {
+    getAccount: jest.fn(),
+    getEvents: jest.fn(),
+    simulateTransaction: jest.fn(),
+    sendTransaction: jest.fn(),
+    getTransaction: jest.fn(),
+  };
 }
 
-function txResult(result: xdr.TransactionResultResult): xdr.TransactionResult {
-  return new xdr.TransactionResult({
-    feeCharged: xdr.Int64.fromString("100"),
-    result,
-    ext: xdr.TransactionResultExt.fromXDR(Buffer.alloc(4)),
-  });
-}
-
-const trappedResult = () =>
-  txResult(
-    xdr.TransactionResultResult.txFailed([
-      xdr.OperationResult.opInner(
-        xdr.OperationResultTr.invokeHostFunction(
-          xdr.InvokeHostFunctionResult.invokeHostFunctionTrapped()
-        )
-      ),
-    ])
+function buildService(stub: RpcStub, timeoutMs = 1000) {
+  return new SorobanService(
+    { rpcUrl: 'https://rpc.example', networkPassphrase: Networks.TESTNET, timeoutMs, allowHttp: false },
+    stub as unknown as rpc.Server
   );
-
-/** A host `diagnostic` event with topic `error` and data "boom". */
-const DIAGNOSTIC_EVENT_XDR =
-  "AAAAAAAAAAAAAAAAAAAAAgAAAAAAAAABAAAADwAAAAVlcnJvcgAAAAAAAA4AAAAEYm9vbQ==";
-
-function settled() {
-  return {
-    ...ledgerInfo,
-    ledger: 42,
-    createdAt: 1_700_000_000,
-    applicationOrder: 1,
-    feeBump: false,
-    envelopeXdr: {} as xdr.TransactionEnvelope,
-    resultMetaXdr: {} as xdr.TransactionMeta,
-  };
 }
 
-function success(returnValue?: xdr.ScVal): rpc.Api.GetTransactionResponse {
-  return {
-    ...settled(),
-    status: GetTransactionStatus.SUCCESS,
-    resultXdr: txResult(xdr.TransactionResultResult.txSuccess([])),
-    returnValue,
-  };
+function signedTransaction() {
+  const tx = new TransactionBuilder(new Account(source.publicKey(), '1'), {
+    fee: BASE_FEE,
+    networkPassphrase: Networks.TESTNET,
+  })
+    .addOperation(Operation.bumpSequence({ bumpTo: '10' }))
+    .setTimeout(30)
+    .build();
+  tx.sign(source);
+  return tx;
 }
 
-function failed(): rpc.Api.GetTransactionResponse {
-  return {
-    ...settled(),
-    status: GetTransactionStatus.FAILED,
-    resultXdr: trappedResult(),
-    diagnosticEventsXdr: [xdr.DiagnosticEvent.fromXDR(DIAGNOSTIC_EVENT_XDR, "base64")],
-  };
+async function expectAppError(promise: Promise<unknown>, statusCode: number, code: string) {
+  const error = await promise.then(
+    () => {
+      throw new Error('expected rejection');
+    },
+    (err: unknown) => err
+  );
+  expect(error).toBeInstanceOf(AppError);
+  expect(error).toMatchObject({ statusCode, code });
+  return error as AppError;
 }
 
-function service(client: SorobanRpcClient, clock: Clock) {
-  return new SorobanService(client, Networks.TESTNET, DEFAULTS, clock);
-}
+let stub: RpcStub;
+let service: SorobanService;
 
-describe("SorobanService.getTransactionStatus", () => {
-  it("maps NOT_FOUND to PENDING", async () => {
-    const client = rpcClient();
-    client.getTransaction.mockResolvedValue(notFound());
+beforeEach(() => {
+  stub = buildStub();
+  service = buildService(stub);
+});
 
-    await expect(service(client, virtualClock()).getTransactionStatus(TX_HASH)).resolves.toEqual({
-      status: "PENDING",
-      txHash: TX_HASH,
+describe('configuration', () => {
+  it('reads RPC URL and passphrase from config/env', () => {
+    expect(defaultSorobanConfig()).toEqual({
+      rpcUrl: 'https://soroban-testnet.stellar.org',
+      networkPassphrase: 'Test SDF Network ; September 2015',
+      timeoutMs: 30000,
+      allowHttp: false,
+    });
+    expect(sorobanService.networkPassphrase).toBe('Test SDF Network ; September 2015');
+  });
+
+  it('rejects a non-positive timeout at construction', () => {
+    expect(
+      () =>
+        new SorobanService({
+          rpcUrl: 'https://rpc.example',
+          networkPassphrase: Networks.TESTNET,
+          timeoutMs: 0,
+          allowHttp: false,
+        })
+    ).toThrow(/STELLAR_RPC_TIMEOUT_MS/);
+  });
+
+  it('refuses plain-http RPC URLs unless explicitly allowed', () => {
+    const config = { rpcUrl: 'http://localhost:8000/soroban/rpc', networkPassphrase: Networks.TESTNET, timeoutMs: 1000 };
+
+    expect(() => new SorobanService({ ...config, allowHttp: false })).toThrow(/insecure/i);
+    expect(() => new SorobanService({ ...config, allowHttp: true })).not.toThrow();
+  });
+});
+
+describe('loadAccount', () => {
+  it('returns the account with its sequence number', async () => {
+    stub.getAccount.mockResolvedValue(new Account(source.publicKey(), '42'));
+
+    const account = await service.loadAccount(source.publicKey());
+
+    expect(stub.getAccount).toHaveBeenCalledWith(source.publicKey());
+    expect(account.sequenceNumber()).toBe('42');
+  });
+
+  it('rejects malformed addresses without calling RPC', async () => {
+    await expectAppError(service.loadAccount('GNOTANADDRESS'), 400, 'INVALID_STELLAR_ADDRESS');
+    expect(stub.getAccount).not.toHaveBeenCalled();
+  });
+
+  it('maps the SDK "account not found" payload to 404', async () => {
+    stub.getAccount.mockRejectedValue({ code: 404, message: `Account not found: ${source.publicKey()}` });
+
+    await expectAppError(service.loadAccount(source.publicKey()), 404, 'STELLAR_ACCOUNT_NOT_FOUND');
+  });
+});
+
+describe('getEvents', () => {
+  it('passes the request through and returns the response', async () => {
+    const response = { events: [], latestLedger: 1000, cursor: '' };
+    stub.getEvents.mockResolvedValue(response);
+    const request = { startLedger: 900, filters: [{ type: 'contract' as const, contractIds: [] }] };
+
+    await expect(service.getEvents(request)).resolves.toBe(response);
+    expect(stub.getEvents).toHaveBeenCalledWith(request);
+  });
+
+  it('maps JSON-RPC invalid params to 400', async () => {
+    stub.getEvents.mockRejectedValue({ code: -32602, message: 'startLedger must be within the ledger range' });
+
+    const error = await expectAppError(service.getEvents({ startLedger: 1, filters: [] }), 400, 'SOROBAN_INVALID_REQUEST');
+    expect(error.message).toContain('startLedger must be within the ledger range');
+  });
+
+  it('maps other JSON-RPC errors to 502', async () => {
+    stub.getEvents.mockRejectedValue({ code: -32603, message: 'internal error' });
+
+    await expectAppError(service.getEvents({ startLedger: 1, filters: [] }), 502, 'SOROBAN_RPC_ERROR');
+  });
+});
+
+describe('simulate', () => {
+  it('returns successful simulations', async () => {
+    const response = {
+      id: '1',
       latestLedger: 100,
-    });
-  });
-
-  it("rejects malformed hashes without calling the RPC", async () => {
-    const client = rpcClient();
-    await expect(
-      service(client, virtualClock()).getTransactionStatus("not-a-hash")
-    ).rejects.toMatchObject({ code: "INVALID_TX_HASH" });
-    expect(client.getTransaction).not.toHaveBeenCalled();
-  });
-
-  it("wraps transport errors as retryable SorobanRpcError", async () => {
-    const client = rpcClient();
-    client.getTransaction.mockRejectedValue(new Error("ECONNRESET"));
-
-    const err = await service(client, virtualClock())
-      .getTransactionStatus(TX_HASH)
-      .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(SorobanRpcError);
-    expect((err as SorobanRpcError).retryable).toBe(true);
-  });
-
-  it("never reports an unrecognised status as success", async () => {
-    const client = rpcClient();
-    client.getTransaction.mockResolvedValue({
-      ...ledgerInfo,
-      status: "UNKNOWN",
-    } as unknown as rpc.Api.GetTransactionResponse);
-
-    await expect(service(client, virtualClock()).getTransactionStatus(TX_HASH)).rejects.toThrow(
-      SorobanRpcError
-    );
-  });
-});
-
-describe("SorobanService.getTransactionWithConfirmation", () => {
-  it("keeps polling while NOT_FOUND and resolves on SUCCESS", async () => {
-    const client = rpcClient();
-    const returnValue = xdr.ScVal.scvU64(new xdr.Uint64(BigInt(7)));
-    client.getTransaction
-      .mockResolvedValueOnce(notFound())
-      .mockResolvedValueOnce(notFound())
-      .mockResolvedValueOnce(success(returnValue));
-    const clock = virtualClock();
-
-    const result = await service(client, clock).getTransactionWithConfirmation(TX_HASH);
-
-    expect(result).toMatchObject({ status: "SUCCESS", txHash: TX_HASH, ledger: 42 });
-    expect(result.returnValue).toBe(returnValue);
-    expect(client.getTransaction).toHaveBeenCalledTimes(3);
-    expect(clock.sleeps).toEqual([1_000, 1_000]);
-  });
-
-  it("moves from pending to failure and surfaces tx_failed diagnostics", async () => {
-    const client = rpcClient();
-    client.getTransaction.mockResolvedValueOnce(notFound()).mockResolvedValueOnce(failed());
-
-    const err = await service(client, virtualClock())
-      .getTransactionWithConfirmation(TX_HASH)
-      .catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(TransactionFailedError);
-    const failure = err as TransactionFailedError;
-    expect(failure.retryable).toBe(false);
-    expect(failure.code).toBe("TX_FAILED");
-    expect(failure.message).toContain("tx_failed");
-    expect(failure.diagnostics).toMatchObject({
-      txHash: TX_HASH,
-      resultCode: "tx_failed",
-      operationResultCodes: ["invoke_host_function_trapped"],
-      ledger: 42,
-    });
-    expect(failure.diagnostics.diagnosticEventsXdr).toEqual([DIAGNOSTIC_EVENT_XDR]);
-  });
-
-  it("times out as an expired transaction when every poll is NOT_FOUND", async () => {
-    const client = rpcClient();
-    client.getTransaction.mockResolvedValue(notFound());
-    const clock = virtualClock();
-
-    const err = await service(client, clock)
-      .getTransactionWithConfirmation(TX_HASH, { timeoutMs: 45_000, pollIntervalMs: 10_000 })
-      .catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(TransactionConfirmationTimeoutError);
-    const timeout = err as TransactionConfirmationTimeoutError;
-    expect(timeout.outcomeUnknown).toBe(false);
-    expect(timeout.retryable).toBe(false);
-    // Polls at t=0,10,20,30,40,45s then stops; the final sleep is clamped to the deadline.
-    expect(client.getTransaction).toHaveBeenCalledTimes(6);
-    expect(clock.sleeps).toEqual([10_000, 10_000, 10_000, 10_000, 5_000]);
-  });
-
-  it("marks the timeout outcome unknown when the window is shorter than tx validity", async () => {
-    const client = rpcClient();
-    client.getTransaction.mockResolvedValue(notFound());
-
-    const err = await service(client, virtualClock())
-      .getTransactionWithConfirmation(TX_HASH, { timeoutMs: 5_000 })
-      .catch((e: unknown) => e);
-
-    expect((err as TransactionConfirmationTimeoutError).outcomeUnknown).toBe(true);
-  });
-
-  it("tolerates transient RPC errors and still confirms", async () => {
-    const client = rpcClient();
-    client.getTransaction
-      .mockRejectedValueOnce(new Error("503 Service Unavailable"))
-      .mockResolvedValueOnce(notFound())
-      .mockRejectedValueOnce(new Error("socket hang up"))
-      .mockResolvedValueOnce(success());
-
-    await expect(
-      service(client, virtualClock()).getTransactionWithConfirmation(TX_HASH)
-    ).resolves.toMatchObject({ status: "SUCCESS" });
-  });
-
-  it("aborts after the configured number of consecutive RPC errors", async () => {
-    const client = rpcClient();
-    client.getTransaction.mockRejectedValue(new Error("ECONNREFUSED"));
-
-    await expect(
-      service(client, virtualClock()).getTransactionWithConfirmation(TX_HASH)
-    ).rejects.toThrow(SorobanRpcError);
-    expect(client.getTransaction).toHaveBeenCalledTimes(DEFAULTS.maxConsecutiveRpcErrors);
-  });
-
-  it("flags a timeout after RPC errors as retryable (outcome unknown)", async () => {
-    const client = rpcClient();
-    client.getTransaction
-      .mockRejectedValueOnce(new Error("timeout"))
-      .mockResolvedValue(notFound());
-
-    const err = await service(client, virtualClock())
-      .getTransactionWithConfirmation(TX_HASH, { timeoutMs: 40_000, pollIntervalMs: 10_000 })
-      .catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(TransactionConfirmationTimeoutError);
-    expect((err as TransactionConfirmationTimeoutError).retryable).toBe(true);
-  });
-});
-
-describe("SorobanService.submitTransaction", () => {
-  function signed(): SignedContractTransaction {
-    return { hash: TX_HASH, xdr: "AAAA", transaction: {} as Transaction };
-  }
-
-  it.each(["PENDING", "DUPLICATE"] as const)("accepts %s", async (status) => {
-    const client = rpcClient();
-    client.sendTransaction.mockResolvedValue({
-      status,
-      hash: TX_HASH,
-      latestLedger: 1,
-      latestLedgerCloseTime: 0,
-    });
-    await expect(service(client, virtualClock()).submitTransaction(signed())).resolves.toBeUndefined();
-  });
-
-  it("raises a retryable error on TRY_AGAIN_LATER", async () => {
-    const client = rpcClient();
-    client.sendTransaction.mockResolvedValue({
-      status: "TRY_AGAIN_LATER",
-      hash: TX_HASH,
-      latestLedger: 1,
-      latestLedgerCloseTime: 0,
-    });
-    const err = await service(client, virtualClock())
-      .submitTransaction(signed())
-      .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(TransactionSubmissionError);
-    expect((err as TransactionSubmissionError).retryable).toBe(true);
-  });
-
-  it("surfaces rejection diagnostics on ERROR", async () => {
-    const client = rpcClient();
-    client.sendTransaction.mockResolvedValue({
-      status: "ERROR",
-      hash: TX_HASH,
-      latestLedger: 1,
-      latestLedgerCloseTime: 0,
-      errorResult: txResult(xdr.TransactionResultResult.txBadSeq()),
-    });
-    const err = await service(client, virtualClock())
-      .submitTransaction(signed())
-      .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(TransactionFailedError);
-    expect((err as TransactionFailedError).diagnostics.resultCode).toBe("tx_bad_seq");
-    // A stale sequence number is fixed by rebuilding the transaction.
-    expect((err as TransactionFailedError).retryable).toBe(true);
-  });
-});
-
-describe("SorobanService.buildMintTransaction", () => {
-  it("builds a signed mint invocation through the transaction builder", async () => {
-    const keypair = Keypair.random();
-    const client = rpcClient();
-    client.getAccount.mockResolvedValue(new Account(keypair.publicKey(), "1"));
-    client.simulateTransaction.mockResolvedValue({
-      _parsed: true,
-      id: "1",
-      latestLedger: 1,
       events: [],
-      transactionData: new SorobanDataBuilder(),
-      minResourceFee: "100",
-      result: { auth: [], retval: xdr.ScVal.scvU64(new xdr.Uint64(BigInt(1))) },
-    });
-
-    const result = await service(client, virtualClock()).buildMintTransaction(
-      keypair,
-      StrKey.encodeContract(crypto.randomBytes(32)),
-      {
-        to: Keypair.random().publicKey(),
-        mediaCid: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
-        manifestHash: crypto.randomBytes(32).toString("hex"),
-        attestationHash: crypto.randomBytes(32).toString("hex"),
-      }
-    );
-
-    expect(result.hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(result.transaction.signatures).toHaveLength(1);
-  });
-
-  it("keeps contract simulation failures non-retryable", async () => {
-    const keypair = Keypair.random();
-    const client = rpcClient();
-    client.getAccount.mockResolvedValue(new Account(keypair.publicKey(), "1"));
-    client.simulateTransaction.mockResolvedValue({
       _parsed: true,
-      id: "1",
-      latestLedger: 1,
-      events: [],
-      error: "HostError: Certificate already exists for this manifest hash",
-    });
+      transactionData: {},
+      minResourceFee: '100',
+      cost: { cpuInsns: '0', memBytes: '0' },
+    };
+    stub.simulateTransaction.mockResolvedValue(response);
+    const tx = signedTransaction();
 
-    const err = await service(client, virtualClock())
-      .buildMintTransaction(keypair, StrKey.encodeContract(crypto.randomBytes(32)), {
-        to: keypair.publicKey(),
-        mediaCid: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
-        manifestHash: crypto.randomBytes(32).toString("hex"),
-        attestationHash: crypto.randomBytes(32).toString("hex"),
-      })
-      .catch((e: unknown) => e);
-
-    expect(err).toBeInstanceOf(TransactionSimulationError);
-    expect((err as TransactionSimulationError).retryable).toBe(false);
+    await expect(service.simulate(tx)).resolves.toBe(response);
+    expect(stub.simulateTransaction).toHaveBeenCalledWith(tx);
   });
 
-  it("wraps RPC transport failures as retryable RPC errors", async () => {
-    const keypair = Keypair.random();
-    const client = rpcClient();
-    client.getAccount.mockRejectedValue(new Error("account not found"));
+  it('raises simulation errors as 422', async () => {
+    stub.simulateTransaction.mockResolvedValue({
+      id: '1',
+      latestLedger: 100,
+      events: [],
+      _parsed: true,
+      error: 'HostError: Error(Contract, #3)',
+    });
 
-    await expect(
-      service(client, virtualClock()).buildMintTransaction(
-        keypair,
-        StrKey.encodeContract(crypto.randomBytes(32)),
-        {
-          to: keypair.publicKey(),
-          mediaCid: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
-          manifestHash: crypto.randomBytes(32).toString("hex"),
-          attestationHash: crypto.randomBytes(32).toString("hex"),
-        }
-      )
-    ).rejects.toThrow(SorobanRpcError);
+    const error = await expectAppError(service.simulate(signedTransaction()), 422, 'SOROBAN_SIMULATION_FAILED');
+    expect(error.message).toContain('Error(Contract, #3)');
   });
 });
 
-describe("extractFailureDiagnostics", () => {
-  it("returns an unknown code when no result is available", () => {
-    expect(extractFailureDiagnostics(TX_HASH, undefined, undefined)).toEqual({
-      txHash: TX_HASH,
-      resultCode: "unknown",
-      operationResultCodes: [],
-      diagnosticEventsXdr: [],
+describe('sendTransaction', () => {
+  it.each(['PENDING', 'DUPLICATE'] as const)('returns %s submissions', async (status) => {
+    const response = { status, hash: TX_HASH, latestLedger: 100, latestLedgerCloseTime: 0 };
+    stub.sendTransaction.mockResolvedValue(response);
+
+    await expect(service.sendTransaction(signedTransaction())).resolves.toBe(response);
+  });
+
+  it('maps TRY_AGAIN_LATER to 503', async () => {
+    stub.sendTransaction.mockResolvedValue({ status: 'TRY_AGAIN_LATER', hash: TX_HASH, latestLedger: 100, latestLedgerCloseTime: 0 });
+
+    await expectAppError(service.sendTransaction(signedTransaction()), 503, 'SOROBAN_TRY_AGAIN_LATER');
+  });
+
+  it('maps ERROR to 422 with the transaction result code', async () => {
+    // TransactionResult { feeCharged: 100, result: txBadSeq, ext: v0 }
+    const errorResult = xdr.TransactionResult.fromXDR('AAAAAAAAAGT////7AAAAAA==', 'base64');
+    stub.sendTransaction.mockResolvedValue({
+      status: 'ERROR',
+      hash: TX_HASH,
+      latestLedger: 100,
+      latestLedgerCloseTime: 0,
+      errorResult,
     });
+
+    const error = await expectAppError(service.sendTransaction(signedTransaction()), 422, 'SOROBAN_TRANSACTION_REJECTED');
+    expect(error.message).toContain('txBadSeq');
+  });
+});
+
+describe('getTransaction', () => {
+  it('returns NOT_FOUND as data rather than an error', async () => {
+    const response = { status: 'NOT_FOUND', txHash: TX_HASH, latestLedger: 100 };
+    stub.getTransaction.mockResolvedValue(response);
+
+    await expect(service.getTransaction(TX_HASH.toUpperCase())).resolves.toBe(response);
+    expect(stub.getTransaction).toHaveBeenCalledWith(TX_HASH);
+  });
+
+  it('rejects malformed hashes without calling RPC', async () => {
+    await expectAppError(service.getTransaction('abc'), 400, 'INVALID_TRANSACTION_HASH');
+    expect(stub.getTransaction).not.toHaveBeenCalled();
+  });
+});
+
+describe('transport failures', () => {
+  const axiosError = (fields: Record<string, unknown>) => ({ isAxiosError: true, message: 'request failed', ...fields });
+
+  it('maps HTTP 429 to 429', async () => {
+    stub.getTransaction.mockRejectedValue(axiosError({ response: { status: 429 } }));
+
+    await expectAppError(service.getTransaction(TX_HASH), 429, 'SOROBAN_RPC_RATE_LIMITED');
+  });
+
+  it('maps HTTP 5xx to 502', async () => {
+    stub.getTransaction.mockRejectedValue(axiosError({ response: { status: 503 } }));
+
+    await expectAppError(service.getTransaction(TX_HASH), 502, 'SOROBAN_RPC_UNAVAILABLE');
+  });
+
+  it('maps connection failures to 503', async () => {
+    stub.getTransaction.mockRejectedValue(axiosError({ code: 'ECONNREFUSED', message: 'connect ECONNREFUSED' }));
+
+    await expectAppError(service.getTransaction(TX_HASH), 503, 'SOROBAN_RPC_UNREACHABLE');
+  });
+
+  it('maps transport timeouts to 504', async () => {
+    stub.getTransaction.mockRejectedValue(axiosError({ code: 'ECONNABORTED', message: 'timeout exceeded' }));
+
+    await expectAppError(service.getTransaction(TX_HASH), 504, 'SOROBAN_RPC_TIMEOUT');
+  });
+
+  it('fails with 504 when the RPC does not answer within the configured timeout', async () => {
+    const slowService = buildService(stub, 20);
+    stub.getTransaction.mockReturnValue(new Promise(() => undefined));
+
+    const error = await expectAppError(slowService.getTransaction(TX_HASH), 504, 'SOROBAN_RPC_TIMEOUT');
+    expect(error.message).toContain('20ms');
+  });
+
+  it('maps unknown errors to 502', async () => {
+    stub.getEvents.mockRejectedValue(new Error('unexpected XDR'));
+
+    await expectAppError(service.getEvents({ startLedger: 1, filters: [] }), 502, 'SOROBAN_RPC_ERROR');
   });
 });
