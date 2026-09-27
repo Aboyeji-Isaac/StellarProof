@@ -1,4 +1,4 @@
-import mongoose from "mongoose";
+﻿import mongoose from "mongoose";
 import { StatusCodes } from "http-status-codes";
 
 import { VerificationJobModel } from "../models/verificationJob.model";
@@ -35,12 +35,31 @@ function assertValidTransition(
   }
 }
 
+/**
+ * Appends an immutable timeline entry to a job document in memory.
+ * Callers are responsible for persisting the change via `job.save()`.
+ * `txHash` is only recorded when the transition actually carries one
+ * (e.g. entering `minting`); it is omitted otherwise.
+ */
+function recordTimelineEntry(
+  job: { timeline: Array<{ stage: VerificationStatus; at: Date; txHash?: string }> },
+  stage: VerificationStatus,
+  txHash?: string
+): void {
+  job.timeline.push({
+    stage,
+    at: new Date(),
+    ...(txHash ? { txHash } : {}),
+  });
+}
+
 async function createJob(dto: CreateVerificationJobDTO): Promise<IVerificationJob> {
   const job = await VerificationJobModel.create({
     ownerPublicKey: dto.ownerPublicKey,
     contentHash: dto.contentHash,
     status: VerificationStatus.PENDING,
     ...(dto.webhookUrl ? { webhookUrl: dto.webhookUrl } : {}),
+    timeline: [{ stage: VerificationStatus.PENDING, at: new Date() }],
   });
 
   return job.toObject<IVerificationJob>();
@@ -126,6 +145,8 @@ async function updateJobStatus(
     job.stellarTransactionHash = dto.stellarTransactionHash;
   if (dto.errorMessage !== undefined) job.errorMessage = dto.errorMessage;
 
+  recordTimelineEntry(job, nextStatus, dto.stellarTransactionHash);
+
   await job.save();
 
   return job.toObject<IVerificationJob>();
@@ -158,6 +179,8 @@ async function receiveOracleAttestation(
   job.teeAttestationHash = dto.teeAttestationHash;
   job.teeSignature = dto.teeSignature;
   job.status = nextStatus;
+
+  recordTimelineEntry(job, nextStatus);
 
   await job.save();
 
