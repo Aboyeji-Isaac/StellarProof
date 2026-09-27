@@ -1,55 +1,58 @@
 /**
- * Domain types for Soroban transaction submission and finality tracking.
+ * Types for Soroban RPC access with multi-endpoint failover.
  */
-import type { xdr } from "@stellar/stellar-sdk";
-
-/** Structured detail extracted from a failed or rejected transaction. */
-export interface TransactionFailureDiagnostics {
-  txHash: string;
-  /** Transaction-level result code in snake_case, e.g. `tx_failed`, `tx_bad_seq`. */
-  resultCode: string;
-  /** Per-operation result codes, e.g. `invoke_host_function_trapped`. */
-  operationResultCodes: string[];
-  /** Base64 `DiagnosticEvent` XDR emitted by the host, capped in length. */
-  diagnosticEventsXdr: string[];
-  /** Ledger the failure was recorded in; absent for pre-ledger rejections. */
-  ledger?: number;
-}
-
-export interface PendingTransactionStatus {
-  status: "PENDING";
-  txHash: string;
-  latestLedger: number;
-}
-
-export interface SuccessfulTransactionStatus {
-  status: "SUCCESS";
-  txHash: string;
-  ledger: number;
-  /** Ledger close time, unix seconds. */
-  createdAt: number;
-  /** Contract function return value, when the RPC provides one. */
-  returnValue?: xdr.ScVal;
-}
-
-export interface FailedTransactionStatus {
-  status: "FAILED";
-  txHash: string;
-  diagnostics: TransactionFailureDiagnostics;
-}
 
 /**
- * Normalised transaction status. RPC `NOT_FOUND` maps to `PENDING`: the
- * transaction is either still in flight or not yet visible to this node.
+ * Circuit breaker state for a single RPC endpoint.
+ * - closed:    endpoint is in rotation
+ * - open:      endpoint is skipped until the cooldown elapses
+ * - half_open: cooldown elapsed; the next request is a trial
  */
-export type TransactionStatusResult =
-  | PendingTransactionStatus
-  | SuccessfulTransactionStatus
-  | FailedTransactionStatus;
+export type RpcCircuitState = 'closed' | 'open' | 'half_open';
 
-export interface TransactionConfirmationOptions {
-  pollIntervalMs: number;
+export interface RpcEndpointStatus {
+  /** Position in the failover order (1 = primary). */
+  priority: number;
+  /** Redacted endpoint (origin only) so API keys in paths/queries never leak. */
+  endpoint: string;
+  state: RpcCircuitState;
+  consecutiveFailures: number;
+  openedAt?: Date;
+  retryAt?: Date;
+  lastError?: string;
+}
+
+export interface RpcFailoverOptions {
+  failureThreshold: number;
+  cooldownMs: number;
   timeoutMs: number;
-  /** Consecutive RPC errors tolerated before polling aborts. */
-  maxConsecutiveRpcErrors: number;
+  allowHttp: boolean;
+}
+
+export interface RpcFailoverEventInput {
+  operation: string;
+  fromEndpoint: string;
+  toEndpoint?: string;
+  reason: string;
+  errorCode?: string;
+  circuitOpened: boolean;
+}
+
+export interface RpcNetworkStatus {
+  activeEndpoint: string | null;
+  latestLedger: {
+    sequence: number;
+    protocolVersion: string;
+    id: string;
+  };
+  endpoints: RpcEndpointStatus[];
+  recentFailovers: Array<{
+    operation: string;
+    fromEndpoint: string;
+    toEndpoint?: string;
+    reason: string;
+    errorCode?: string;
+    circuitOpened: boolean;
+    occurredAt: Date;
+  }>;
 }

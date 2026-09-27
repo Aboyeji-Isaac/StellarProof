@@ -1,301 +1,289 @@
-/**
- * Soroban RPC access for oracle-side contract calls: building signed
- * transactions, submitting them, and confirming finality.
- *
- * Finality rule: a transaction is only reported successful once the RPC
- * returns `SUCCESS` for it. `NOT_FOUND` is always treated as pending, and a
- * transaction that never leaves pending surfaces as a timeout error rather
- * than a success.
- */
-import { Keypair, Transaction, rpc, xdr } from "@stellar/stellar-sdk";
-import { StatusCodes } from "http-status-codes";
-import { env } from "../config/env";
-import { AppError } from "../errors/AppError";
-import {
-  SorobanRpcError,
-  TransactionConfirmationTimeoutError,
-  TransactionFailedError,
-  TransactionSubmissionError,
-} from "../errors/SorobanTransactionError";
-import {
-  TX_TIMEOUT_SECONDS,
-  buildSignedContractTransaction,
-  type SignedContractTransaction,
-  type SorobanTransactionSource,
-} from "../utils/transactionBuilder";
-import { buildMintArgs, type MintArgs } from "../utils/xdr";
-import logger from "../utils/logger";
+import { rpc } from '@stellar/stellar-sdk';
+import { StatusCodes } from 'http-status-codes';
+import { env } from '../config/env';
+import { AppError } from '../errors/AppError';
+import RpcFailoverEvent from '../models/RpcFailoverEvent.model';
+import logger from '../utils/logger';
 import type {
-  SuccessfulTransactionStatus,
-  TransactionConfirmationOptions,
-  TransactionFailureDiagnostics,
-  TransactionStatusResult,
-} from "../types/soroban.types";
+  RpcCircuitState,
+  RpcEndpointStatus,
+  RpcFailoverEventInput,
+  RpcFailoverOptions,
+  RpcNetworkStatus,
+} from '../types/soroban.types';
 
-/** The subset of `rpc.Server` this service depends on. */
-export interface SorobanRpcClient extends SorobanTransactionSource {
-  getTransaction(hash: string): Promise<rpc.Api.GetTransactionResponse>;
-  sendTransaction(tx: Transaction): Promise<rpc.Api.SendTransactionResponse>;
+/** Transport-level error codes that indicate the endpoint, not the request, failed. */
+const NETWORK_ERROR_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'EPIPE',
+  'ERR_NETWORK',
+  'ERR_BAD_RESPONSE',
+]);
+
+interface TransportErrorLike {
+  code?: unknown;
+  message?: unknown;
+  isAxiosError?: unknown;
+  response?: { status?: unknown };
 }
 
-/** Time source, injectable so polling can be exercised deterministically. */
-export interface Clock {
-  now(): number;
-  sleep(ms: number): Promise<void>;
+/**
+ * Returns true when an error means the RPC endpoint itself is unavailable
+ * (connection failure, timeout, 5xx, 429). JSON-RPC errors such as a failed
+ * simulation are request-level and must not trigger a failover.
+ */
+export function isRpcNetworkError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const err = error as TransportErrorLike;
+
+  if (typeof err.code === 'string' && NETWORK_ERROR_CODES.has(err.code)) return true;
+
+  const status = err.response?.status;
+  if (typeof status === 'number') return status >= 500 || status === 429;
+
+  // Axios error with no response at all: the request never completed.
+  return err.isAxiosError === true && err.response === undefined;
 }
 
-export const systemClock: Clock = {
-  now: () => Date.now(),
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-};
-
-const TX_HASH_REGEX = /^[0-9a-f]{64}$/;
-const MAX_DIAGNOSTIC_EVENTS = 20;
-
-function toSnakeCase(name: string): string {
-  return name.replace(/([a-z0-9])([A-Z])/g, "$1_$2").toLowerCase();
-}
-
-function describeOperationResult(result: xdr.OperationResult): string {
-  const outer = result.switch().name;
-  if (outer !== "opInner") return toSnakeCase(outer);
-  const inner = result.tr().value() as { switch(): { name: string } };
-  return toSnakeCase(inner.switch().name);
-}
-
-function operationResultsOf(result: xdr.TransactionResult): xdr.OperationResult[] {
-  const body = result.result();
-  switch (body.switch().name) {
-    case "txSuccess":
-    case "txFailed":
-      return body.results();
-    case "txFeeBumpInnerSuccess":
-    case "txFeeBumpInnerFailed": {
-      const inner = body.innerResultPair().result().result();
-      const innerCode = inner.switch().name;
-      return innerCode === "txSuccess" || innerCode === "txFailed" ? inner.results() : [];
-    }
-    default:
-      return [];
+/** Origin-only form of an endpoint so credentials in paths/queries are never logged. */
+export function redactEndpoint(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return '[invalid-url]';
   }
 }
 
-/** Extracts result codes and diagnostic events from a transaction result. */
-export function extractFailureDiagnostics(
-  txHash: string,
-  result: xdr.TransactionResult | undefined,
-  diagnosticEvents: xdr.DiagnosticEvent[] | undefined,
-  ledger?: number
-): TransactionFailureDiagnostics {
-  let resultCode = "unknown";
-  let operationResultCodes: string[] = [];
-
-  if (result) {
-    try {
-      resultCode = toSnakeCase(result.result().switch().name);
-      operationResultCodes = operationResultsOf(result).map(describeOperationResult);
-    } catch (err) {
-      logger.warn("Soroban: could not decode transaction result", {
-        txHash,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  return {
-    txHash,
-    resultCode,
-    operationResultCodes,
-    diagnosticEventsXdr: (diagnosticEvents ?? [])
-      .slice(0, MAX_DIAGNOSTIC_EVENTS)
-      .map((event) => event.toXDR("base64")),
-    ...(ledger !== undefined ? { ledger } : {}),
-  };
+function describeError(error: unknown): { reason: string; errorCode?: string } {
+  const err = (error ?? {}) as TransportErrorLike;
+  const status = err.response?.status;
+  const reason = error instanceof Error ? error.message : typeof err.message === 'string' ? err.message : String(error);
+  const errorCode = typeof err.code === 'string' ? err.code : typeof status === 'number' ? `HTTP_${status}` : undefined;
+  return { reason: reason.slice(0, 1000), errorCode };
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+interface EndpointState {
+  url: string;
+  label: string;
+  server: rpc.Server;
+  consecutiveFailures: number;
+  openedAt?: number;
+  lastError?: string;
 }
 
-export class SorobanService {
+/**
+ * Multi-endpoint Soroban RPC client with a per-endpoint circuit breaker.
+ *
+ * Calls go to the highest-priority endpoint whose circuit is not open. On a
+ * network-level failure the call is retried on the next endpoint and a
+ * failover event is logged and persisted. After `failureThreshold`
+ * consecutive failures an endpoint's circuit opens for `cooldownMs`; the
+ * first call after the cooldown is a half-open trial that either closes the
+ * circuit or re-opens it.
+ */
+export class RpcFailover {
+  private readonly endpoints: EndpointState[];
+
   constructor(
-    private readonly client: SorobanRpcClient,
-    private readonly networkPassphrase: string,
-    private readonly confirmationDefaults: TransactionConfirmationOptions,
-    private readonly clock: Clock = systemClock
-  ) {}
+    urls: string[],
+    private readonly options: RpcFailoverOptions,
+    serverFactory: (url: string) => rpc.Server = (url) =>
+      new rpc.Server(url, { allowHttp: options.allowHttp, timeout: options.timeoutMs }),
+  ) {
+    this.endpoints = [];
+    for (const url of urls) {
+      try {
+        this.endpoints.push({ url, label: redactEndpoint(url), server: serverFactory(url), consecutiveFailures: 0 });
+      } catch (error) {
+        logger.error('Skipping unusable Stellar RPC endpoint', {
+          endpoint: redactEndpoint(url),
+          error: describeError(error).reason,
+        });
+      }
+    }
 
-  /** Builds, prepares and signs a `provenance.mint` invocation. */
-  async buildMintTransaction(
-    keypair: Keypair,
-    contractId: string,
-    args: MintArgs
-  ): Promise<SignedContractTransaction> {
-    try {
-      return await buildSignedContractTransaction({
-        client: this.client,
-        keypair,
-        networkPassphrase: this.networkPassphrase,
-        call: { contractId, method: "mint", args: buildMintArgs(args) },
-      });
-    } catch (err) {
-      if (err instanceof AppError) throw err;
-      // Account lookup or simulation failed at the RPC layer.
-      throw new SorobanRpcError(`Failed to prepare mint transaction: ${errorMessage(err)}`);
+    if (this.endpoints.length === 0) {
+      throw new Error('No usable Stellar RPC endpoints configured');
     }
   }
 
   /**
-   * Submits a signed transaction. Resolves once the RPC has accepted it
-   * (`PENDING` or `DUPLICATE`); acceptance is not finality.
+   * Runs an RPC operation with failover across the configured endpoints.
    */
-  async submitTransaction(signed: SignedContractTransaction): Promise<void> {
-    let response: rpc.Api.SendTransactionResponse;
-    try {
-      response = await this.client.sendTransaction(signed.transaction);
-    } catch (err) {
-      throw new SorobanRpcError(`sendTransaction failed: ${errorMessage(err)}`, signed.hash);
-    }
+  async execute<T>(operation: string, call: (server: rpc.Server) => Promise<T>): Promise<T> {
+    const candidates = this.endpoints.filter((endpoint) => this.stateOf(endpoint) !== 'open');
 
-    switch (response.status) {
-      case "PENDING":
-      case "DUPLICATE":
-        return;
-      case "TRY_AGAIN_LATER":
-        throw new TransactionSubmissionError(
-          `RPC deferred transaction ${signed.hash}; resubmit later`,
-          signed.hash
-        );
-      case "ERROR":
-        throw new TransactionFailedError(
-          extractFailureDiagnostics(signed.hash, response.errorResult, response.diagnosticEvents)
-        );
-      default:
-        throw new SorobanRpcError(
-          `Unexpected sendTransaction status: ${String(response.status)}`,
-          signed.hash
-        );
-    }
-  }
-
-  /** Reads a transaction's current status once. `NOT_FOUND` maps to `PENDING`. */
-  async getTransactionStatus(txHash: string): Promise<TransactionStatusResult> {
-    if (!TX_HASH_REGEX.test(txHash)) {
+    if (candidates.length === 0) {
+      logger.error('All Stellar RPC circuits are open', { event: 'rpc_unavailable', operation });
       throw new AppError(
-        `Invalid transaction hash: '${txHash}'`,
-        StatusCodes.BAD_REQUEST,
-        "INVALID_TX_HASH"
+        'All Stellar RPC endpoints are temporarily unavailable',
+        StatusCodes.SERVICE_UNAVAILABLE,
+        'RPC_UNAVAILABLE',
       );
     }
 
-    let response: rpc.Api.GetTransactionResponse;
-    try {
-      response = await this.client.getTransaction(txHash);
-    } catch (err) {
-      throw new SorobanRpcError(`getTransaction failed: ${errorMessage(err)}`, txHash);
+    let lastError: unknown;
+    for (let i = 0; i < candidates.length; i++) {
+      const endpoint = candidates[i];
+      try {
+        const result = await call(endpoint.server);
+        this.recordSuccess(endpoint);
+        return result;
+      } catch (error) {
+        if (!isRpcNetworkError(error)) {
+          // Request-level error (bad params, failed simulation, ...): the
+          // endpoint is healthy, so surface it without rotating.
+          this.recordSuccess(endpoint);
+          throw error;
+        }
+
+        lastError = error;
+        const circuitOpened = this.recordFailure(endpoint, error);
+        const next = candidates[i + 1];
+        const { reason, errorCode } = describeError(error);
+
+        this.logFailover({
+          operation,
+          fromEndpoint: endpoint.label,
+          toEndpoint: next?.label,
+          reason,
+          errorCode,
+          circuitOpened,
+        });
+      }
     }
 
-    switch (response.status) {
-      case rpc.Api.GetTransactionStatus.NOT_FOUND:
-        return { status: "PENDING", txHash, latestLedger: response.latestLedger };
-      case rpc.Api.GetTransactionStatus.SUCCESS:
-        return {
-          status: "SUCCESS",
-          txHash,
-          ledger: response.ledger,
-          createdAt: response.createdAt,
-          ...(response.returnValue ? { returnValue: response.returnValue } : {}),
-        };
-      case rpc.Api.GetTransactionStatus.FAILED:
-        return {
-          status: "FAILED",
-          txHash,
-          diagnostics: extractFailureDiagnostics(
-            txHash,
-            response.resultXdr,
-            response.diagnosticEventsXdr,
-            response.ledger
-          ),
-        };
-      default:
-        // Never infer success from a status this client does not understand.
-        throw new SorobanRpcError(
-          `Unexpected getTransaction status: ${String((response as { status: unknown }).status)}`,
-          txHash
-        );
-    }
+    throw new AppError(
+      `All Stellar RPC endpoints failed for ${operation}: ${describeError(lastError).reason}`,
+      StatusCodes.BAD_GATEWAY,
+      'RPC_ALL_ENDPOINTS_FAILED',
+    );
   }
 
-  /**
-   * Polls until the transaction is final.
-   *
-   * @returns the `SUCCESS` status.
-   * @throws TransactionFailedError when the transaction failed on-chain.
-   * @throws TransactionConfirmationTimeoutError when no final state is seen in time.
-   * @throws SorobanRpcError after too many consecutive RPC errors.
-   */
-  async getTransactionWithConfirmation(
-    txHash: string,
-    options: Partial<TransactionConfirmationOptions> = {}
-  ): Promise<SuccessfulTransactionStatus> {
-    const { pollIntervalMs, timeoutMs, maxConsecutiveRpcErrors } = {
-      ...this.confirmationDefaults,
-      ...options,
-    };
-    const deadline = this.clock.now() + timeoutMs;
-    let attempts = 0;
-    let consecutiveRpcErrors = 0;
-    let sawRpcError = false;
+  /** Current circuit state of every endpoint, in failover order. */
+  getEndpointStatuses(): RpcEndpointStatus[] {
+    return this.endpoints.map((endpoint, index) => {
+      const state = this.stateOf(endpoint);
+      return {
+        priority: index + 1,
+        endpoint: endpoint.label,
+        state,
+        consecutiveFailures: endpoint.consecutiveFailures,
+        openedAt: endpoint.openedAt !== undefined ? new Date(endpoint.openedAt) : undefined,
+        retryAt:
+          endpoint.openedAt !== undefined ? new Date(endpoint.openedAt + this.options.cooldownMs) : undefined,
+        lastError: endpoint.lastError,
+      };
+    });
+  }
 
-    for (;;) {
-      attempts += 1;
-      try {
-        const status = await this.getTransactionStatus(txHash);
-        consecutiveRpcErrors = 0;
+  /** Redacted endpoint the next call will use, or null if all circuits are open. */
+  getActiveEndpoint(): string | null {
+    return this.endpoints.find((endpoint) => this.stateOf(endpoint) !== 'open')?.label ?? null;
+  }
 
-        if (status.status === "SUCCESS") {
-          logger.info("Soroban: transaction confirmed", {
-            txHash,
-            ledger: status.ledger,
-            attempts,
-          });
-          return status;
-        }
-        if (status.status === "FAILED") {
-          logger.warn("Soroban: transaction failed", { ...status.diagnostics, attempts });
-          throw new TransactionFailedError(status.diagnostics);
-        }
-      } catch (err) {
-        if (!(err instanceof SorobanRpcError)) throw err;
-        sawRpcError = true;
-        consecutiveRpcErrors += 1;
-        logger.warn("Soroban: RPC error while polling transaction", {
-          txHash,
-          attempts,
-          consecutiveRpcErrors,
-          error: err.message,
-        });
-        if (consecutiveRpcErrors >= maxConsecutiveRpcErrors) throw err;
-      }
+  private stateOf(endpoint: EndpointState): RpcCircuitState {
+    if (endpoint.openedAt === undefined) return 'closed';
+    return Date.now() - endpoint.openedAt >= this.options.cooldownMs ? 'half_open' : 'open';
+  }
 
-      const remaining = deadline - this.clock.now();
-      if (remaining <= 0) {
-        const outcomeUnknown = sawRpcError || timeoutMs <= TX_TIMEOUT_SECONDS * 1000;
-        throw new TransactionConfirmationTimeoutError(txHash, timeoutMs, attempts, outcomeUnknown);
-      }
-      await this.clock.sleep(Math.min(pollIntervalMs, remaining));
+  private recordSuccess(endpoint: EndpointState): void {
+    if (endpoint.openedAt !== undefined) {
+      logger.info('Stellar RPC circuit closed', { event: 'rpc_circuit_closed', endpoint: endpoint.label });
     }
+    endpoint.consecutiveFailures = 0;
+    endpoint.openedAt = undefined;
+    endpoint.lastError = undefined;
+  }
+
+  /** Returns true when this failure opened (or re-opened) the circuit. */
+  private recordFailure(endpoint: EndpointState, error: unknown): boolean {
+    const wasHalfOpen = this.stateOf(endpoint) === 'half_open';
+    endpoint.consecutiveFailures += 1;
+    endpoint.lastError = describeError(error).reason;
+
+    if (wasHalfOpen || endpoint.consecutiveFailures >= this.options.failureThreshold) {
+      endpoint.openedAt = Date.now();
+      logger.warn('Stellar RPC circuit opened', {
+        event: 'rpc_circuit_opened',
+        endpoint: endpoint.label,
+        consecutiveFailures: endpoint.consecutiveFailures,
+        cooldownMs: this.options.cooldownMs,
+      });
+      return true;
+    }
+    return false;
+  }
+
+  private logFailover(event: RpcFailoverEventInput): void {
+    logger.warn('Stellar RPC failover', { event: 'rpc_failover', ...event });
+
+    // Persisting the audit record must never delay or break the RPC call.
+    RpcFailoverEvent.create({ ...event, occurredAt: new Date() }).catch((error: unknown) => {
+      logger.error('Failed to persist RPC failover event', { error: describeError(error).reason });
+    });
   }
 }
 
-export const sorobanService = new SorobanService(
-  new rpc.Server(env.STELLAR_RPC_URL, {
-    allowHttp: env.STELLAR_RPC_URL.startsWith("http://"),
-  }),
-  env.STELLAR_NETWORK_PASSPHRASE,
-  {
-    pollIntervalMs: env.STELLAR_TX_POLL_INTERVAL_MS,
-    timeoutMs: env.STELLAR_TX_CONFIRMATION_TIMEOUT_MS,
-    maxConsecutiveRpcErrors: env.STELLAR_TX_MAX_CONSECUTIVE_RPC_ERRORS,
+class SorobanService {
+  private failover: RpcFailover | null = null;
+
+  /** Shared failover-aware RPC client, created on first use. */
+  get rpc(): RpcFailover {
+    if (!this.failover) {
+      this.failover = new RpcFailover(env.STELLAR_RPC_URLS, {
+        failureThreshold: env.STELLAR_RPC_FAILURE_THRESHOLD,
+        cooldownMs: env.STELLAR_RPC_COOLDOWN_MS,
+        timeoutMs: env.STELLAR_RPC_TIMEOUT_MS,
+        allowHttp: env.NODE_ENV !== 'production',
+      });
+    }
+    return this.failover;
   }
-);
+
+  /**
+   * Runs any Soroban RPC call with transparent endpoint failover.
+   * e.g. `sorobanService.execute('simulateTransaction', (s) => s.simulateTransaction(tx))`
+   */
+  execute<T>(operation: string, call: (server: rpc.Server) => Promise<T>): Promise<T> {
+    return this.rpc.execute(operation, call);
+  }
+
+  async getLatestLedger(): Promise<rpc.Api.GetLatestLedgerResponse> {
+    return this.execute('getLatestLedger', (server) => server.getLatestLedger());
+  }
+
+  /**
+   * Live network status: latest ledger (fetched through failover), circuit
+   * state of each endpoint, and the most recent failover events from MongoDB.
+   */
+  async getNetworkStatus(recentLimit = 20): Promise<RpcNetworkStatus> {
+    const [latestLedger, recentFailovers] = await Promise.all([
+      this.getLatestLedger(),
+      RpcFailoverEvent.find({}, { _id: 0, __v: 0 })
+        .sort({ occurredAt: -1 })
+        .limit(recentLimit)
+        .lean<RpcNetworkStatus['recentFailovers']>(),
+    ]);
+
+    return {
+      activeEndpoint: this.rpc.getActiveEndpoint(),
+      latestLedger: {
+        sequence: latestLedger.sequence,
+        protocolVersion: latestLedger.protocolVersion,
+        id: latestLedger.id,
+      },
+      endpoints: this.rpc.getEndpointStatuses(),
+      recentFailovers,
+    };
+  }
+}
+
+export const sorobanService = new SorobanService();
