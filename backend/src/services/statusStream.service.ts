@@ -89,7 +89,7 @@ export class StatusStreamService {
     const payload = this.serializeSSE("status", eventData);
     const deadSubscribers: Response[] = [];
 
-    for (const subscriberRes of jobSubscribers) {
+    for (const subscriberRes of Array.from(jobSubscribers)) {
       try {
         subscriberRes.write(payload);
       } catch {
@@ -113,8 +113,8 @@ export class StatusStreamService {
    * Removes all subscribers (used during shutdown).
    */
   async disconnectAll(): Promise<void> {
-    for (const [, jobSubscribers] of this.subscribers) {
-      for (const res of jobSubscribers) {
+    for (const [, jobSubscribers] of Array.from(this.subscribers)) {
+      for (const res of Array.from(jobSubscribers)) {
         try {
           res.end();
         } catch {
