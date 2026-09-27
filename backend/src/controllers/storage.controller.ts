@@ -2,8 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import { StatusCodes } from 'http-status-codes';
 import mongoose from 'mongoose';
 import { AppError } from '../errors/AppError';
-import Asset from '../models/Asset.model';
 import Manifest from '../models/Manifest.model';
+import { assetService } from '../services/asset.service';
 import { ipfsService } from '../services/ipfs.service';
 import { storageOrchestratorService } from '../services/storage.service';
 import { StorageError, type StorageProvider } from '../types/storage.types';
@@ -110,23 +110,25 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
       userId,
     });
 
-    const asset = await Asset.create({
-      creatorId: new mongoose.Types.ObjectId(userId),
+    const asset = await assetService.createFromUpload({
+      creatorId: userId,
       fileName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      sizeBytes: uploadResult.size,
-      storageProvider: uploadResult.provider,
-      storageReferenceId: uploadResult.cid || uploadResult.url,
-      isEncrypted: false,
+      upload: uploadResult,
     });
+
+    const mediaCid = asset.storageProvider === 'ipfs' ? asset.storageReferenceId : undefined;
 
     res.status(StatusCodes.CREATED).json({
       success: true,
       message: 'Media uploaded successfully',
       data: {
         assetId: asset._id,
+        storageProvider: asset.storageProvider,
+        storageReferenceId: asset.storageReferenceId,
         url: uploadResult.url,
-        cid: uploadResult.cid,
+        cid: mediaCid,
+        mediaCid,
+        cidVersion: mediaCid ? 1 : undefined,
       },
     });
   } catch (error) {
