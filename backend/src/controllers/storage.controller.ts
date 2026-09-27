@@ -109,14 +109,10 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
       userId,
     });
 
-    const asset = await Asset.create({
-      creatorId: new mongoose.Types.ObjectId(userId),
+    const asset = await assetService.createFromUpload({
+      creatorId: userId,
       fileName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      sizeBytes: uploadResult.size,
-      storageProvider: uploadResult.provider,
-      storageReferenceId: uploadResult.cid || uploadResult.url,
-      isEncrypted: false,
+      upload: uploadResult,
     });
 
     if (uploadResult.recordId) {
@@ -128,6 +124,8 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
       message: 'Media uploaded successfully',
       data: {
         assetId: asset._id,
+        storageProvider: asset.storageProvider,
+        storageReferenceId: asset.storageReferenceId,
         url: uploadResult.url,
         cid: uploadResult.cid,
         deduplicated: uploadResult.deduplicated ?? false,
@@ -142,7 +140,7 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
   try {
     const { manifestId } = req.body;
 
-    if (!manifestId || !mongoose.Types.ObjectId.isValid(manifestId)) {
+    if (typeof manifestId !== 'string') {
       throw new AppError('Valid manifestId is required', StatusCodes.BAD_REQUEST, 'INVALID_MANIFEST_ID');
     }
 
@@ -187,9 +185,11 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
       success: true,
       message: 'Manifest uploaded to IPFS successfully',
       data: {
-        manifestId: manifest._id,
-        cid: manifest.ipfsCid,
-        url: manifest.ipfsUrl,
+        manifestId: result.manifestId,
+        manifestHash: result.manifestHash,
+        manifestCid: result.manifestCid,
+        cid: result.manifestCid,
+        url: result.ipfsUrl,
       },
     });
   } catch (error) {
