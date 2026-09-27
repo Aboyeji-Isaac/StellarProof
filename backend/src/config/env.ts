@@ -21,30 +21,15 @@ function optionalEnv(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
-/**
- * Ordered list of Soroban RPC endpoints: the required primary followed by
- * the optional STELLAR_RPC_URL_2 / STELLAR_RPC_URL_3 fallbacks. Blank and
- * duplicate entries are dropped; malformed URLs abort startup.
- */
-function rpcUrlList(): string[] {
-  const urls = [
-    requireEnv("STELLAR_RPC_URL"),
-    optionalEnv("STELLAR_RPC_URL_2", ""),
-    optionalEnv("STELLAR_RPC_URL_3", ""),
-  ]
-    .map((url) => url.trim())
-    .filter((url) => url.length > 0);
-
-  for (const url of urls) {
-    try {
-      new URL(url);
-    } catch {
-      console.error(`[Config] Invalid Stellar RPC URL configured: ${url}`);
-      process.exit(1);
-    }
+function optionalPositiveIntEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    console.error(`[Config] ${key} must be a positive integer, got "${raw}"`);
+    process.exit(1);
   }
-
-  return Array.from(new Set(urls));
+  return value;
 }
 
 export const env = {
@@ -184,16 +169,9 @@ export const env = {
   /** Pinata public gateway base URL */
   PINATA_GATEWAY_URL: optionalEnv("PINATA_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs"),
 
-  /**
-   * Comma-separated storage provider preference used by the failover
-   * registry, most preferred first. Unknown names are ignored and any
-   * supported provider not listed is appended.
-   */
-  STORAGE_PROVIDER_PRIORITY: optionalEnv("STORAGE_PROVIDER_PRIORITY", "ipfs,cloudinary"),
+  /** Max time (ms) to wait for the IPFS gateway when resolving a CID */
+  IPFS_RESOLVE_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_RESOLVE_TIMEOUT_MS", 15_000),
 
-  /** How long a provider health result is trusted before re-checking (ms). */
-  STORAGE_HEALTH_TTL_MS: parseInt(optionalEnv("STORAGE_HEALTH_TTL_MS", "60000"), 10),
-
-  /** Timeout applied to each provider health check (ms). */
-  STORAGE_HEALTH_CHECK_TIMEOUT_MS: parseInt(optionalEnv("STORAGE_HEALTH_CHECK_TIMEOUT_MS", "5000"), 10),
+  /** Max bytes downloaded from the IPFS gateway when resolving a CID (defaults to the 100 MB upload limit) */
+  IPFS_RESOLVE_MAX_BYTES: optionalPositiveIntEnv("IPFS_RESOLVE_MAX_BYTES", 100 * 1024 * 1024),
 } as const;

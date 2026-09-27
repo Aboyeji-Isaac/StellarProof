@@ -3,7 +3,7 @@ import { StatusCodes } from 'http-status-codes';
 import mongoose from 'mongoose';
 import { AppError } from '../errors/AppError';
 import Asset from '../models/Asset.model';
-import { manifestService } from '../services/manifest.service';
+import Manifest from '../models/Manifest.model';
 import { storageOrchestratorService } from '../services/storage.service';
 import { StorageError, type StorageProvider } from '../types/storage.types';
 
@@ -115,7 +115,9 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
       upload: uploadResult,
     });
 
-    const mediaCid = asset.storageProvider === 'ipfs' ? asset.storageReferenceId : undefined;
+    if (uploadResult.recordId) {
+      await storageOrchestratorService.linkAsset(uploadResult.recordId, asset._id.toString());
+    }
 
     res.status(StatusCodes.CREATED).json({
       success: true,
@@ -125,9 +127,8 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
         storageProvider: asset.storageProvider,
         storageReferenceId: asset.storageReferenceId,
         url: uploadResult.url,
-        cid: mediaCid,
-        mediaCid,
-        cidVersion: mediaCid ? 1 : undefined,
+        cid: uploadResult.cid,
+        deduplicated: uploadResult.deduplicated ?? false,
       },
     });
   } catch (error) {
@@ -143,7 +144,40 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
       throw new AppError('Valid manifestId is required', StatusCodes.BAD_REQUEST, 'INVALID_MANIFEST_ID');
     }
 
-    const result = await manifestService.publishManifestById(manifestId);
+    const manifest = await Manifest.findById(manifestId);
+    if (!manifest) {
+      throw new AppError('Manifest not found', StatusCodes.NOT_FOUND, 'MANIFEST_NOT_FOUND');
+    }
+
+    const manifestObject = manifest.toObject();
+    const { __v, ipfsCid, ipfsUrl, ipfsUploadedAt, ...manifestPayload } = manifestObject as any;
+    void __v;
+    void ipfsCid;
+    void ipfsUrl;
+    void ipfsUploadedAt;
+
+    const manifestBuffer = Buffer.from(JSON.stringify(manifestPayload), 'utf8');
+    // Link the manifest record to the asset whose media bytes it describes
+    const assetId = await storageOrchestratorService.findAssetIdByContentHash(manifest.contentHash);
+
+    const uploadResult = await storageOrchestratorService.orchestrate({
+      storageProvider: 'ipfs',
+      buffer: manifestBuffer,
+      mimetype: 'application/json',
+      originalname: `manifest-${manifest._id}.json`,
+      userId: manifest.creatorId.toString(),
+      kind: 'manifest',
+      assetId,
+      metadata: {
+        manifestId: manifest._id.toString(),
+        manifestHash: manifest.manifestHash || '',
+      },
+    });
+
+    manifest.ipfsCid = uploadResult.cid;
+    manifest.ipfsUrl = uploadResult.url;
+    manifest.ipfsUploadedAt = uploadResult.uploadedAt;
+    await manifest.save();
 
     res.status(StatusCodes.OK).json({
       success: true,
@@ -155,6 +189,19 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
         cid: result.manifestCid,
         url: result.ipfsUrl,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const resolveCid = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await storageOrchestratorService.resolveCid(req.params.cid);
+
+    res.status(StatusCodes.OK).json({
+      success: true,
+      data: result,
     });
   } catch (error) {
     next(error);
