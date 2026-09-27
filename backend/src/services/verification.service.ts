@@ -4,6 +4,9 @@ import { StatusCodes } from "http-status-codes";
 import { VerificationJobModel } from "../models/verificationJob.model";
 import { AppError } from "../errors/AppError";
 import { VerificationStateError } from "../errors/VerificationStateError";
+import Manifest from "../models/Manifest.model";
+import { ipfsService } from "./ipfs.service";
+import { generateDeterministicHash } from "../utils/crypto";
 import {
   VerificationStatus,
   VALID_TRANSITIONS,
@@ -170,4 +173,65 @@ export const verificationService = {
   getJobsByOwner,
   updateJobStatus,
   receiveOracleAttestation,
+  verifyManifestIntegrity,
 } as const;
+
+/**
+ * Fetches the manifest's stored JSON from IPFS, recomputes its deterministic
+ * hash, and compares it against the manifestHash recorded on the Manifest
+ * document (the on-chain/stored claim). On mismatch, the job is transitioned
+ * to `failed` with a descriptive error.
+ */
+async function verifyManifestIntegrity(jobId: string): Promise<IVerificationJob> {
+  assertValidObjectId(jobId);
+
+  const job = await VerificationJobModel.findById(jobId);
+  if (!job) {
+    throw new AppError(
+      `Verification job not found: '${jobId}'`,
+      StatusCodes.NOT_FOUND,
+      "JOB_NOT_FOUND"
+    );
+  }
+
+  if (!job.manifestId) {
+    throw new AppError(
+      `Verification job '${jobId}' has no associated manifest`,
+      StatusCodes.BAD_REQUEST,
+      "MANIFEST_ID_MISSING"
+    );
+  }
+
+  const manifest = await Manifest.findById(job.manifestId);
+  if (!manifest) {
+    throw new AppError(
+      `Manifest not found: '${job.manifestId}'`,
+      StatusCodes.NOT_FOUND,
+      "MANIFEST_NOT_FOUND"
+    );
+  }
+
+  if (!manifest.ipfsCid && !manifest.ipfsUrl) {
+    throw new AppError(
+      `Manifest '${job.manifestId}' has no IPFS reference to fetch`,
+      StatusCodes.BAD_REQUEST,
+      "MANIFEST_IPFS_REF_MISSING"
+    );
+  }
+
+  const fetchedManifestJson = await ipfsService.fetchManifestJson(
+    manifest.ipfsUrl ?? (manifest.ipfsCid as string)
+  );
+
+  const recomputedHash = generateDeterministicHash(fetchedManifestJson);
+  const onChainHash = manifest.manifestHash;
+
+  if (recomputedHash !== onChainHash) {
+    return updateJobStatus(jobId, {
+      status: VerificationStatus.FAILED,
+      errorMessage: `Manifest integrity check failed: recomputed hash '${recomputedHash}' does not match recorded hash '${onChainHash}'`,
+    });
+  }
+
+  return job.toObject<IVerificationJob>();
+}
