@@ -3,6 +3,10 @@ import Manifest from '../models/Manifest.model';
 import mongoose from 'mongoose';
 
 jest.mock('../models/Manifest.model');
+jest.mock('../services/ipfs.service', () => ({
+  __esModule: true,
+  ipfsService: { upload: jest.fn() },
+}));
 
 describe('Manifest Service', () => {
   beforeEach(() => {
