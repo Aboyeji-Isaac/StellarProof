@@ -42,6 +42,22 @@ export const env = {
   /** Soroban/Stellar RPC endpoint, e.g. https://soroban-testnet.stellar.org */
   STELLAR_RPC_URL: requireEnv("STELLAR_RPC_URL"),
 
+  /** Optional backup RPC endpoints used when the primary fails. */
+  STELLAR_RPC_URL_2: optionalEnv("STELLAR_RPC_URL_2", ""),
+  STELLAR_RPC_URL_3: optionalEnv("STELLAR_RPC_URL_3", ""),
+
+  /** Primary + backup RPC endpoints in failover order. */
+  STELLAR_RPC_URLS: rpcUrlList(),
+
+  /** Consecutive network failures before an endpoint's circuit opens. */
+  STELLAR_RPC_FAILURE_THRESHOLD: parseInt(optionalEnv("STELLAR_RPC_FAILURE_THRESHOLD", "3"), 10),
+
+  /** How long an open circuit stays open before a half-open trial (ms). */
+  STELLAR_RPC_COOLDOWN_MS: parseInt(optionalEnv("STELLAR_RPC_COOLDOWN_MS", "30000"), 10),
+
+  /** Per-request timeout for RPC calls (ms). */
+  STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "10000"), 10),
+
   /**
    * Network passphrase used when building simulation transactions.
    * Testnet: "Test SDF Network ; September 2015"
@@ -55,6 +71,77 @@ export const env = {
    * contract uses a different function name (e.g. "balance_of").
    */
   STELLAR_NFT_BALANCE_FN: optionalEnv("STELLAR_NFT_BALANCE_FN", "balance"),
+
+  /**
+   * C-address of the deployed Provenance contract whose `mint` the oracle
+   * worker invokes. Only required by the verification worker, which validates
+   * it at startup so the API server can run without oracle configuration.
+   */
+  STELLAR_PROVENANCE_CONTRACT_ID: optionalEnv("STELLAR_PROVENANCE_CONTRACT_ID", ""),
+
+  /**
+   * S-secret of the oracle account authorised as the Provenance contract's
+   * minter. Only required by the verification worker. Never log this value.
+   */
+  STELLAR_ORACLE_SECRET_KEY: optionalEnv("STELLAR_ORACLE_SECRET_KEY", ""),
+
+  /**
+   * SHA-256 hex measurement of the trusted verifier build, registered in the
+   * Registry contract's TEE hash list. Only required by the verification worker.
+   */
+  ORACLE_CODE_MEASUREMENT_HASH: optionalEnv("ORACLE_CODE_MEASUREMENT_HASH", ""),
+
+  /** Delay between getTransaction polls while awaiting finality. */
+  STELLAR_TX_POLL_INTERVAL_MS: optionalPositiveIntEnv("STELLAR_TX_POLL_INTERVAL_MS", 2_000),
+
+  /**
+   * Maximum time to wait for a submitted transaction to reach a final state.
+   * Must exceed the 30-second transaction timeout so an unconfirmed
+   * transaction is known to have expired once this elapses.
+   */
+  STELLAR_TX_CONFIRMATION_TIMEOUT_MS: optionalPositiveIntEnv(
+    "STELLAR_TX_CONFIRMATION_TIMEOUT_MS",
+    60_000
+  ),
+
+  /** Consecutive RPC errors tolerated while polling before giving up. */
+  STELLAR_TX_MAX_CONSECUTIVE_RPC_ERRORS: optionalPositiveIntEnv(
+    "STELLAR_TX_MAX_CONSECUTIVE_RPC_ERRORS",
+    5
+  ),
+
+  /** Delay between verification worker polling cycles. */
+  VERIFICATION_WORKER_POLL_INTERVAL_MS: optionalPositiveIntEnv(
+    "VERIFICATION_WORKER_POLL_INTERVAL_MS",
+    5_000
+  ),
+
+  /** Maximum events processed per polling cycle. */
+  VERIFICATION_WORKER_BATCH_SIZE: optionalPositiveIntEnv("VERIFICATION_WORKER_BATCH_SIZE", 10),
+
+  /** Processing attempts per event before it is marked failed. */
+  VERIFICATION_WORKER_MAX_ATTEMPTS: optionalPositiveIntEnv("VERIFICATION_WORKER_MAX_ATTEMPTS", 3),
+
+  /** Base delay for exponential retry back-off after a retryable failure. */
+  VERIFICATION_WORKER_RETRY_BASE_MS: optionalPositiveIntEnv(
+    "VERIFICATION_WORKER_RETRY_BASE_MS",
+    30_000
+  ),
+
+  /**
+   * How long a claimed event stays locked to one worker. A crashed worker's
+   * lease expires after this window and the event becomes reclaimable.
+   */
+  VERIFICATION_WORKER_LEASE_MS: optionalPositiveIntEnv("VERIFICATION_WORKER_LEASE_MS", 300_000),
+
+  /** Timeout for each IPFS gateway fetch performed by the SPV verifier. */
+  SPV_FETCH_TIMEOUT_MS: optionalPositiveIntEnv("SPV_FETCH_TIMEOUT_MS", 30_000),
+
+  /** Upper bound on media bytes the SPV verifier will download and hash. */
+  SPV_MAX_MEDIA_BYTES: optionalPositiveIntEnv("SPV_MAX_MEDIA_BYTES", 104_857_600),
+
+  /** Upper bound on manifest bytes the SPV verifier will download. */
+  SPV_MAX_MANIFEST_BYTES: optionalPositiveIntEnv("SPV_MAX_MANIFEST_BYTES", 1_048_576),
   /** Allowed CORS origin for the frontend. */
   CORS_ORIGIN: optionalEnv("CORS_ORIGIN", "http://localhost:3000"),
 

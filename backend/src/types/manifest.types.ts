@@ -44,3 +44,14 @@ export interface CreateManifestPayload {
   timestamp?: Date;
   metadata?: Record<string, unknown>;
 }
+
+/** Result of pinning a manifest to IPFS, read back from the Manifest document. */
+export interface ManifestIpfsUploadResult {
+  manifestId: string;
+  manifestHash: string;
+  manifestCid: string;
+  ipfsUrl: string;
+  ipfsUploadedAt: Date;
+  /** false when the manifest had already been pinned and was returned as-is. */
+  newlyPinned: boolean;
+}

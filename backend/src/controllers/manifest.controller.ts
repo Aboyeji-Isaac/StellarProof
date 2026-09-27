@@ -70,6 +70,30 @@ class ManifestController {
       next(error);
     }
   }
+
+  /**
+   * POST /api/v1/manifests/:id/ipfs
+   */
+  public async uploadManifestToIpfs(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const user = req.user;
+      if (!user) {
+        throw new AppError('Authentication required', StatusCodes.UNAUTHORIZED, 'AUTH_REQUIRED');
+      }
+
+      const result = await manifestService.publishManifestById(req.params.id, String(user._id));
+
+      res.status(result.newlyPinned ? StatusCodes.CREATED : StatusCodes.OK).json({
+        success: true,
+        message: result.newlyPinned
+          ? 'Manifest pinned to IPFS successfully'
+          : 'Manifest was already pinned to IPFS',
+        data: result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
 }
 
 export const manifestController = new ManifestController();

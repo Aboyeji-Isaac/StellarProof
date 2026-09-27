@@ -45,9 +45,13 @@ function normalizeSha256(hash: string): string {
 /**
  * Storage Orchestrator Service
  * Factory that routes upload requests to the appropriate provider (Cloudinary or IPFS)
+ * Consults the provider registry before each upload and fails over to the
+ * next ranked provider when the preferred one is unhealthy or errors.
  * Ensures all uploads are persisted to MongoDB before returning
  */
 class StorageOrchestratorService {
+  constructor(private readonly registry: StorageProviderRegistry) {}
+
   /**
    * Orchestrate the upload based on the requested storage provider
    * Routes to the appropriate provider, persists result to DB, and returns saved record.
@@ -60,12 +64,11 @@ class StorageOrchestratorService {
    */
   async orchestrate(request: UploadRequest): Promise<UploadResult> {
     // Validate provider
-    const validProviders: StorageProvider[] = ['cloudinary', 'ipfs'];
-    if (!validProviders.includes(request.storageProvider)) {
+    if (!STORAGE_PROVIDERS.includes(request.storageProvider)) {
       throw new StorageError(
         null,
         'orchestrate',
-        `Invalid storage provider: ${request.storageProvider}. Supported providers: ${validProviders.join(', ')}`,
+        `Invalid storage provider: ${request.storageProvider}. Supported providers: ${STORAGE_PROVIDERS.join(', ')}`,
         400,
       );
     }
@@ -133,11 +136,13 @@ class StorageOrchestratorService {
       if (error instanceof StorageError) {
         throw error;
       }
+    }
 
+    if (!uploadResult) {
       throw new StorageError(
         request.storageProvider,
         'orchestrate',
-        `Provider delegation failed: ${error instanceof Error ? error.message : String(error)}`,
+        `All storage providers failed: ${failures.join('; ')}`,
         502,
       );
     }
@@ -189,7 +194,7 @@ class StorageOrchestratorService {
       }
 
       throw new StorageError(
-        request.storageProvider,
+        uploadResult.provider,
         'persist',
         `Failed to persist upload record to database: ${dbError instanceof Error ? dbError.message : String(dbError)}`,
         500,
@@ -360,4 +365,4 @@ class StorageOrchestratorService {
   }
 }
 
-export const storageOrchestratorService = new StorageOrchestratorService();
+export const storageOrchestratorService = new StorageOrchestratorService(storageProviderRegistry);
