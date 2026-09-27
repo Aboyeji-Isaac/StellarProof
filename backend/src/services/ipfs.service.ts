@@ -1,8 +1,16 @@
-import { PinataSDK } from "pinata";
+import { PinataSDK, type CidVersion } from "pinata";
 import { StatusCodes } from "http-status-codes";
 import { env } from "../config/env";
 import { AppError } from "../errors/AppError";
+import { isCidV1 } from "../utils/cid";
 import type { IpfsUploadInput, IpfsUploadResult } from "../types/ipfs.types";
+
+/**
+ * Every pin must be requested as CIDv1 so the returned IpfsHash is a
+ * canonical base32 CID that is safe to reference from Soroban contracts.
+ * Never rely on the provider default.
+ */
+const PINATA_CID_VERSION: CidVersion = "v1";
 
 class IpfsService {
   private readonly pinata: PinataSDK;
@@ -28,18 +36,31 @@ class IpfsService {
         file = new File([json], `${name}.json`, { type: "application/json" });
       }
 
-      // In Pinata SDK v3, metadata is often handled via the builder or options
-      // Casting to any to bypass the specific builder type issue if addMetadata is known to work at runtime
-      const response = await (this.pinata.upload.public.file(file) as any).addMetadata({
-        name,
-        keyValues: metadata,
-      });
+      let builder = this.pinata.upload.public
+        .file(file)
+        .name(name)
+        .cidVersion(PINATA_CID_VERSION);
 
-      const cid: string = response.cid;
+      if (Object.keys(metadata).length > 0) {
+        builder = builder.keyvalues(metadata);
+      }
+
+      const response = await builder;
+      const cid = response.cid;
+
+      if (typeof cid !== "string" || !isCidV1(cid)) {
+        throw new AppError(
+          `IPFS upload returned a non-CIDv1 content identifier: ${String(cid)}`,
+          StatusCodes.BAD_GATEWAY,
+          "IPFS_CID_VERSION_MISMATCH"
+        );
+      }
+
       const size: number = response.size ?? (Buffer.isBuffer(content) ? content.byteLength : Buffer.byteLength(JSON.stringify(content)));
 
       return {
         cid,
+        cidVersion: 1,
         size,
         name: response.name ?? name,
         timestamp: new Date().toISOString(),
@@ -59,6 +80,15 @@ class IpfsService {
         "IPFS_UPLOAD_FAILED"
       );
     }
+  }
+
+  /**
+   * Lightweight liveness probe against the Pinata pins (files) API.
+   * Lists a single public file, which exercises authentication and the API
+   * without transferring content. Throws if Pinata is unreachable.
+   */
+  async healthCheck(): Promise<void> {
+    await this.pinata.files.public.list().limit(1);
   }
 }
 

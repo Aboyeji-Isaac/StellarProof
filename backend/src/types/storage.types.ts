@@ -5,6 +5,26 @@
 
 export type StorageProvider = 'cloudinary' | 'ipfs';
 
+export const STORAGE_PROVIDERS: readonly StorageProvider[] = ['ipfs', 'cloudinary'];
+
+export type ProviderHealthStatus = 'healthy' | 'unhealthy';
+
+/**
+ * Ranked view of a provider's health, read from the database.
+ * rank 1 is the provider the orchestrator tries first.
+ */
+export interface ProviderHealthSnapshot {
+  provider: StorageProvider;
+  rank: number;
+  status: ProviderHealthStatus;
+  latencyMs?: number;
+  consecutiveFailures: number;
+  lastError?: string;
+  lastCheckedAt: Date;
+  lastHealthyAt?: Date;
+  source: 'probe' | 'upload';
+}
+
 export interface UploadRequest {
   storageProvider: StorageProvider;
   buffer: Buffer;
@@ -21,6 +41,9 @@ export interface UploadResult {
   size: number;
   mimetype: string;
   uploadedAt: Date;
+  /** Provider the caller asked for; differs from `provider` after a failover. */
+  requestedProvider?: StorageProvider;
+  failedOver?: boolean;
 }
 
 /**
