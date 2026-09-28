@@ -32,6 +32,17 @@ function optionalPositiveIntEnv(key: string, fallback: number): number {
   return value;
 }
 
+function optionalNonNegativeIntEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    console.error(`[Config] ${key} must be a non-negative integer, got "${raw}"`);
+    process.exit(1);
+  }
+  return value;
+}
+
 export const env = {
   NODE_ENV: optionalEnv("NODE_ENV", "development"),
   PORT: parseInt(optionalEnv("PORT", "4000"), 10),
@@ -106,4 +117,13 @@ export const env = {
 
   /** Max bytes downloaded from the IPFS gateway when resolving a CID (defaults to the 100 MB upload limit) */
   IPFS_RESOLVE_MAX_BYTES: optionalPositiveIntEnv("IPFS_RESOLVE_MAX_BYTES", 100 * 1024 * 1024),
+
+  /** Per-attempt timeout (ms) for a single IPFS upload request */
+  IPFS_UPLOAD_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_UPLOAD_TIMEOUT_MS", 30_000),
+
+  /** Additional IPFS upload attempts after the first failure (0 disables retries) */
+  IPFS_UPLOAD_MAX_RETRIES: optionalNonNegativeIntEnv("IPFS_UPLOAD_MAX_RETRIES", 2),
+
+  /** Base delay (ms) for the exponential backoff between IPFS upload attempts */
+  IPFS_UPLOAD_BACKOFF_MS: optionalPositiveIntEnv("IPFS_UPLOAD_BACKOFF_MS", 500),
 } as const;
