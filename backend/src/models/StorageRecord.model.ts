@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document } from 'mongoose';
 import { StorageProvider, StorageRecordKind } from '../types/storage.types';
+import type { IpfsAvailability, IpfsPinStatus } from '../types/ipfs.types';
 
 /**
  * Storage Record Interface
@@ -20,6 +21,9 @@ export interface IStorageRecord extends Document {
   mimetype: string;          // MIME type (e.g., image/png)
   originalFilename: string;  // Original uploaded filename
   uploadedAt: Date;
+  // IPFS only: pin propagation state and gateway reachability captured at upload time.
+  pinningStatus?: IpfsPinStatus;
+  availability?: IpfsAvailability;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -93,6 +97,21 @@ const StorageRecordSchema: Schema = new Schema(
       type: Date,
       default: Date.now,
       required: true,
+    },
+    pinningStatus: {
+      type: String,
+      enum: ['pinning', 'pinned'],
+      // Only IPFS records report pin state; Cloudinary records leave it unset.
+    },
+    availability: {
+      type: new Schema(
+        {
+          available: { type: Boolean },
+          httpStatus: { type: Number, default: null },
+          checkedAt: { type: String },
+        },
+        { _id: false }
+      ),
     },
   },
   { timestamps: true }

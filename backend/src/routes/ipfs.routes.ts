@@ -13,7 +13,8 @@ const upload = multer({
  * POST /api/v1/ipfs/upload/file
  * Upload a binary file to IPFS via Pinata.
  * Accepts multipart/form-data with a single 'file' field.
- * Returns: { success: true, data: { cid, size, name, timestamp, gatewayUrl } }
+ * Returns: { success: true, data: { cid, size, name, timestamp, gatewayUrl,
+ *   pinId, pinningStatus: 'pinning' | 'pinned', availability } }
  */
 router.post(
   "/upload/file",
@@ -26,7 +27,8 @@ router.post(
  * Upload a JSON document to IPFS via Pinata.
  * Accepts application/json body. Optional 'name' and 'metadata' fields are
  * extracted; the rest of the body becomes the pinned document.
- * Returns: { success: true, data: { cid, size, name, timestamp, gatewayUrl } }
+ * Returns: { success: true, data: { cid, size, name, timestamp, gatewayUrl,
+ *   pinId, pinningStatus: 'pinning' | 'pinned', availability } }
  */
 router.post(
   "/upload/json",

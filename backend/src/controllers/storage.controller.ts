@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 import { AppError } from '../errors/AppError';
 import Asset from '../models/Asset.model';
 import Manifest from '../models/Manifest.model';
+import { assetService } from '../services/asset.service';
 import { storageOrchestratorService } from '../services/storage.service';
 import { StorageError, type StorageProvider } from '../types/storage.types';
 
@@ -127,7 +128,17 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
         storageProvider: asset.storageProvider,
         storageReferenceId: asset.storageReferenceId,
         url: uploadResult.url,
+        // IPFS uploads: the gateway URL and the real pin/availability state
+        // captured before this response was written, so the progression UI can
+        // keep the upload pending while the pin propagates.
+        ...(uploadResult.gatewayUrl ? { gatewayUrl: uploadResult.gatewayUrl } : {}),
+        ...(uploadResult.pinningStatus ? { pinningStatus: uploadResult.pinningStatus } : {}),
+        ...(uploadResult.availability ? { availability: uploadResult.availability } : {}),
         cid: uploadResult.cid,
+        // The documented media contract names the pinned CID `mediaCid`.
+        mediaCid: uploadResult.cid,
+        // IPFS pins are always requested as CIDv1.
+        cidVersion: uploadResult.cid ? 1 : undefined,
         deduplicated: uploadResult.deduplicated ?? false,
       },
     });
@@ -185,11 +196,14 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
       success: true,
       message: 'Manifest uploaded to IPFS successfully',
       data: {
-        manifestId: result.manifestId,
-        manifestHash: result.manifestHash,
-        manifestCid: result.manifestCid,
-        cid: result.manifestCid,
-        url: result.ipfsUrl,
+        manifestId: manifest._id.toString(),
+        manifestHash: manifest.manifestHash,
+        manifestCid: uploadResult.cid,
+        cid: uploadResult.cid,
+        url: uploadResult.url,
+        gatewayUrl: uploadResult.url,
+        ...(uploadResult.pinningStatus ? { pinningStatus: uploadResult.pinningStatus } : {}),
+        ...(uploadResult.availability ? { availability: uploadResult.availability } : {}),
       },
     });
   } catch (error) {

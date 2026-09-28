@@ -101,6 +101,17 @@ export const env = {
   /** Pinata public gateway base URL */
   PINATA_GATEWAY_URL: optionalEnv("PINATA_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs"),
 
+  /**
+   * Bounded polling window used to observe Pinata's real pin state after an
+   * upload, so responses report `pinning` until the pin actually propagates.
+   */
+  IPFS_PIN_POLL_INTERVAL_MS: optionalPositiveIntEnv("IPFS_PIN_POLL_INTERVAL_MS", 500),
+  IPFS_PIN_POLL_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_PIN_POLL_TIMEOUT_MS", 6_000),
+  IPFS_PIN_POLL_MAX_ATTEMPTS: optionalPositiveIntEnv("IPFS_PIN_POLL_MAX_ATTEMPTS", 8),
+
+  /** Max time (ms) to wait for the post-upload gateway availability probe */
+  IPFS_AVAILABILITY_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_AVAILABILITY_TIMEOUT_MS", 4_000),
+
   /** Max time (ms) to wait for the IPFS gateway when resolving a CID */
   IPFS_RESOLVE_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_RESOLVE_TIMEOUT_MS", 15_000),
 

@@ -2,6 +2,7 @@
  * Shared interfaces and types for storage orchestration
  * All storage-related types are defined here for consistency
  */
+import type { IpfsAvailability, IpfsPinStatus } from './ipfs.types';
 
 export type StorageProvider = 'cloudinary' | 'ipfs';
 
@@ -34,6 +35,23 @@ export interface UploadResult {
   uploadedAt: Date;
   /** True when an existing record was reused instead of pinning the bytes again */
   deduplicated?: boolean;
+  /**
+   * IPFS only: public gateway URL for the pinned CID. Mirrors `url` for IPFS
+   * records so clients have an explicit, provider-named field. Absent for
+   * Cloudinary uploads.
+   */
+  gatewayUrl?: string;
+  /**
+   * IPFS only: Pinata pin state captured when the upload was accepted.
+   * `pinning` means the pin has not propagated yet, so clients should keep
+   * the upload in a pending state. Absent for Cloudinary uploads.
+   */
+  pinningStatus?: IpfsPinStatus;
+  /**
+   * IPFS only: gateway reachability for the CID, probed before responding.
+   * Absent for Cloudinary uploads.
+   */
+  availability?: IpfsAvailability;
 }
 
 /**

@@ -22,6 +22,9 @@ import logger from '../utils/logger';
 const CID_V0_PATTERN = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/;
 const CID_V1_BASE32_PATTERN = /^b[a-z2-7]{50,}$/;
 
+/** Providers the orchestrator can route to. */
+const STORAGE_PROVIDERS: readonly StorageProvider[] = ['cloudinary', 'ipfs'];
+
 export function isValidCid(cid: string): boolean {
   return CID_V0_PATTERN.test(cid) || CID_V1_BASE32_PATTERN.test(cid);
 }
@@ -104,7 +107,6 @@ class StorageOrchestratorService {
       if (!this.canFallBack(request)) {
         throw primaryError;
       }
-    }
 
       const primaryReason = errorMessage(primaryError);
       logger.warn('IPFS upload failed; falling back to Cloudinary', {
@@ -152,6 +154,8 @@ class StorageOrchestratorService {
       mimetype: uploadResult.mimetype,
       originalFilename: request.originalname,
       uploadedAt: uploadResult.uploadedAt,
+      pinningStatus: uploadResult.pinningStatus,
+      availability: uploadResult.availability,
     });
 
     try {
@@ -256,10 +260,13 @@ class StorageOrchestratorService {
           return {
             provider: 'ipfs',
             url: ipfsUpload.gatewayUrl,
+            gatewayUrl: ipfsUpload.gatewayUrl,
             cid: ipfsUpload.cid,
             size: ipfsUpload.size,
             mimetype: request.mimetype,
             uploadedAt: new Date(ipfsUpload.timestamp),
+            pinningStatus: ipfsUpload.pinningStatus,
+            availability: ipfsUpload.availability,
           };
         }
 
@@ -318,6 +325,11 @@ class StorageOrchestratorService {
       mimetype: record.mimetype,
       uploadedAt: record.uploadedAt,
       deduplicated,
+      // IPFS records store the CID as their URL; expose it under its
+      // provider-named key so every upload response carries `gatewayUrl`.
+      ...(record.provider === 'ipfs' && record.cid ? { gatewayUrl: record.url } : {}),
+      ...(record.pinningStatus ? { pinningStatus: record.pinningStatus } : {}),
+      ...(record.availability ? { availability: record.availability } : {}),
     };
   }
 
