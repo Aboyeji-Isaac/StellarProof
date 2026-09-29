@@ -1,9 +1,7 @@
-import { createHash } from "crypto";
 import { PinataSDK } from "pinata";
 import { StatusCodes } from "http-status-codes";
 import { env } from "../config/env";
 import { AppError } from "../errors/AppError";
-import { isCidV1 } from "../utils/cid";
 import type { IpfsUploadInput, IpfsUploadResult } from "../types/ipfs.types";
 import type { GatewayFetchOptions, GatewayFetchResult } from "../types/storage.types";
 
@@ -196,72 +194,35 @@ class IpfsService {
     const message = error instanceof Error ? error.message : "IPFS upload failed — unknown error";
     return new AppError(`IPFS upload failed: ${message}`, StatusCodes.BAD_GATEWAY, IPFS_UPLOAD_FAILED);
   }
-
-  /** Public gateway URL for a CID. */
-  getGatewayUrl(cid: string): string {
-    return `${env.PINATA_GATEWAY_URL.replace(/\/+$/, "")}/${cid}`;
-  }
-
-  /**
-   * Stream a CID from the Pinata gateway and compute its SHA-256.
-   * The whole request (headers + body) is bounded by `timeoutMs`, and the
-   * download is aborted as soon as it exceeds `maxBytes`, so a slow gateway
-   * or an oversized object can never stall or exhaust the API process.
-   * Gateway-side failures are reported as a status rather than thrown.
-   */
-  async fetchFromGateway(cid: string, options: GatewayFetchOptions): Promise<GatewayFetchResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  
+  async fetchManifestJson(cidOrUrl: string): Promise<Record<string, any>> {
+    const url = cidOrUrl.startsWith("http")
+      ? cidOrUrl
+      : `${env.PINATA_GATEWAY_URL}/${cidOrUrl}`;
 
     try {
-      const response = await fetch(this.getGatewayUrl(cid), {
-        method: "GET",
-        signal: controller.signal,
-        redirect: "follow",
-      });
+      const response = await fetch(url);
 
-      if (response.status === StatusCodes.NOT_FOUND || response.status === StatusCodes.GONE) {
-        await response.body?.cancel();
-        return { status: "not_found", httpStatus: response.status };
+      if (!response.ok) {
+        throw new AppError(
+          `IPFS fetch failed with status ${response.status}`,
+          StatusCodes.BAD_GATEWAY,
+          "IPFS_FETCH_FAILED"
+        );
       }
 
-      if (!response.ok || !response.body) {
-        await response.body?.cancel();
-        return { status: "unreachable", httpStatus: response.status };
-      }
+      return await response.json();
+    } catch (err: unknown) {
+      if (err instanceof AppError) throw err;
 
-      const lengthHeader = response.headers.get("content-length");
-      const declaredSize = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
+      const message =
+        err instanceof Error ? err.message : "IPFS fetch failed - unknown error";
 
-      if (declaredSize !== null && declaredSize > options.maxBytes) {
-        await response.body.cancel();
-        return { status: "too_large", declaredSize };
-      }
-
-      const hash = createHash("sha256");
-      const reader = response.body.getReader();
-      let received = 0;
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        received += value.byteLength;
-        if (received > options.maxBytes) {
-          await reader.cancel();
-          return { status: "too_large", declaredSize };
-        }
-        hash.update(value);
-      }
-
-      return { status: "ok", size: received, sha256: hash.digest("hex") };
-    } catch {
-      if (controller.signal.aborted) {
-        return { status: "timeout" };
-      }
-      return { status: "unreachable" };
-    } finally {
-      clearTimeout(timer);
+      throw new AppError(
+        `IPFS fetch failed: ${message}`,
+        StatusCodes.BAD_GATEWAY,
+        "IPFS_FETCH_FAILED"
+      );
     }
   }
 }

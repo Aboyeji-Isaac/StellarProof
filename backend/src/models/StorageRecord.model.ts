@@ -1,5 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
-import { StorageProvider, StorageRecordKind } from '../types/storage.types';
+import { StorageProvider } from '../types/storage.types';
 
 /**
  * Storage Record Interface
@@ -18,8 +18,12 @@ export interface IStorageRecord extends Document {
   fallbackFrom?: StorageProvider; // Requested provider when the upload fell back to `provider`
   size: number;              // File size in bytes
   mimetype: string;          // MIME type (e.g., image/png)
+  contentHash?: string;      // SHA-256 hex of the stored bytes (server-computed)
   originalFilename: string;  // Original uploaded filename
   uploadedAt: Date;
+  requestedProvider: StorageProvider; // Provider the client asked for
+  fallbackUsed: boolean;              // True when `provider` differs from `requestedProvider`
+  fallbackReason?: string;            // Why the requested provider failed
   createdAt: Date;
   updatedAt: Date;
 }
@@ -85,6 +89,12 @@ const StorageRecordSchema: Schema = new Schema(
       type: String,
       required: [true, 'MIME type is required'],
     },
+    contentHash: {
+      type: String,
+      lowercase: true,
+      match: [/^[a-f0-9]{64}$/, 'contentHash must be a SHA-256 hex digest'],
+      index: true,
+    },
     originalFilename: {
       type: String,
       required: [true, 'Original filename is required'],
@@ -93,6 +103,20 @@ const StorageRecordSchema: Schema = new Schema(
       type: Date,
       default: Date.now,
       required: true,
+    },
+    requestedProvider: {
+      type: String,
+      enum: ['cloudinary', 'ipfs'],
+      required: [true, 'Requested storage provider is required'],
+    },
+    fallbackUsed: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    fallbackReason: {
+      type: String,
+      maxlength: 1000,
     },
   },
   { timestamps: true }

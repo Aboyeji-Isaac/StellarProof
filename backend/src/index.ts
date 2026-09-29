@@ -3,8 +3,8 @@ import { initCloudinary } from "./config/cloudinary";
 import { connectDatabase, disconnectDatabase } from "./config/database";
 import { env } from "./config/env";
 import { startCleanupJob } from "./jobs/cleanup.job";
-import { startStorageHealthJob } from "./jobs/storageHealth.job";
 import { startVerificationTimeoutJob } from "./jobs/verificationTimeout.job";
+import { statusStreamService } from "./services/statusStream.service";
 
 function hasCloudinaryConfig(): boolean {
   return Boolean(
@@ -18,8 +18,7 @@ async function main(): Promise<void> {
   await connectDatabase();
 
   startVerificationTimeoutJob();
-  startStorageHealthJob();
-
+  startManifestRehashWorker();
   if (hasCloudinaryConfig()) {
     initCloudinary();
     startCleanupJob();
@@ -34,6 +33,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[Server] ${signal} received — shutting down gracefully`);
+    await statusStreamService.disconnectAll();
     server.close(async () => {
       await disconnectDatabase();
       console.log("[Server] HTTP server closed");

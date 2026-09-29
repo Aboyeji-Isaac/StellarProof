@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Centralised environment configuration.
  * All process.env reads happen here. Downstream modules import from `env`
  * and never access process.env directly.
