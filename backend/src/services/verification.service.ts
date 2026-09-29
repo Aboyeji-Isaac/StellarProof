@@ -39,6 +39,8 @@ async function createJob(dto: CreateVerificationJobDTO): Promise<IVerificationJo
   const job = await VerificationJobModel.create({
     ownerPublicKey: dto.ownerPublicKey,
     contentHash: dto.contentHash,
+    ...(dto.manifestHash ? { manifestHash: dto.manifestHash } : {}),
+    ...(dto.requestId ? { requestId: dto.requestId } : {}),
     status: VerificationStatus.PENDING,
     ...(dto.webhookUrl ? { webhookUrl: dto.webhookUrl } : {}),
   });
@@ -164,10 +166,71 @@ async function receiveOracleAttestation(
   return job.toObject<IVerificationJob>();
 }
 
+export interface AttestationEventUpdate {
+  manifestHash?: string;
+  requestId?: string;
+  attestationHash?: string;
+  transactionHash: string;
+}
+
+export interface CertificateMintedEventUpdate {
+  manifestHash?: string;
+  requestId?: string;
+  certificateId: string;
+  transactionHash: string;
+}
+
+function correlationFilter(manifestHash?: string, requestId?: string): Record<string, unknown> {
+  const alternatives = [
+    ...(manifestHash ? [{ manifestHash }] : []),
+    ...(requestId ? [{ requestId }] : []),
+  ];
+  if (alternatives.length === 0) {
+    throw new AppError(
+      "Contract event is missing manifestHash and requestId",
+      StatusCodes.BAD_REQUEST,
+      "EVENT_CORRELATION_MISSING"
+    );
+  }
+  return { $or: alternatives };
+}
+
+async function advanceFromAttestationEvent(
+  event: AttestationEventUpdate
+): Promise<IVerificationJob | null> {
+  const job = await VerificationJobModel.findOne(correlationFilter(event.manifestHash, event.requestId));
+  if (!job) return null;
+
+  if (job.status === VerificationStatus.TEE_VERIFYING) {
+    job.status = VerificationStatus.MINTING;
+    job.attestationTransactionHash = event.transactionHash;
+    if (event.attestationHash) job.teeAttestationHash = event.attestationHash;
+    await job.save();
+  }
+  return job.toObject<IVerificationJob>();
+}
+
+async function completeFromMintEvent(
+  event: CertificateMintedEventUpdate
+): Promise<IVerificationJob | null> {
+  const job = await VerificationJobModel.findOne(correlationFilter(event.manifestHash, event.requestId));
+  if (!job) return null;
+
+  if (job.status === VerificationStatus.MINTING) {
+    job.status = VerificationStatus.COMPLETED;
+    job.stellarTransactionHash = event.transactionHash;
+    job.certificateId = event.certificateId;
+    await job.save();
+  }
+  return job.toObject<IVerificationJob>();
+}
+
 export const verificationService = {
   createJob,
   getJob,
   getJobsByOwner,
   updateJobStatus,
   receiveOracleAttestation,
+  advanceFromAttestationEvent,
+  completeFromMintEvent,
 } as const;

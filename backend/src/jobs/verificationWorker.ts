@@ -269,7 +269,12 @@ export class VerificationWorker {
       });
 
       if (!job) {
-        job = await jobs.createJob({ ownerPublicKey: event.requester, contentHash: result.contentHash });
+        job = await jobs.createJob({
+          ownerPublicKey: event.requester,
+          contentHash: result.contentHash,
+          manifestHash: result.manifestHash,
+          requestId: event.eventId,
+        });
         await events.attachJob(event._id, this.workerId, String(job._id));
       }
       const id = String(job._id);

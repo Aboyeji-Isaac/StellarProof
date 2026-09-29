@@ -72,6 +72,16 @@ export const env = {
    */
   STELLAR_NFT_BALANCE_FN: optionalEnv("STELLAR_NFT_BALANCE_FN", "balance"),
 
+  /** Contracts and paging configuration for the Soroban event ingester. */
+  STELLAR_ORACLE_CONTRACT_ID: optionalEnv("STELLAR_ORACLE_CONTRACT_ID", ""),
+  STELLAR_PROVENANCE_CONTRACT_ID: optionalEnv("STELLAR_PROVENANCE_CONTRACT_ID", ""),
+  EVENT_INGESTION_START_LEDGER: parseInt(optionalEnv("EVENT_INGESTION_START_LEDGER", "0"), 10),
+  EVENT_INGESTION_LIMIT: optionalPositiveIntEnv("EVENT_INGESTION_LIMIT", 100),
+  EVENT_INGESTION_POLL_INTERVAL_MS: optionalPositiveIntEnv(
+    "EVENT_INGESTION_POLL_INTERVAL_MS",
+    5_000
+  ),
+
   /** Max time (ms) to wait for a single Soroban RPC call before failing with 504 */
   STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "30000"), 10),
   /** Allowed CORS origin for the frontend. */

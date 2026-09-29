@@ -44,6 +44,18 @@ const VerificationJobSchema = new Schema<VerificationJobDocument>(
       trim: true,
       index: true,
     },
+    manifestHash: {
+      type: String,
+      trim: true,
+      index: true,
+      default: undefined,
+    },
+    requestId: {
+      type: String,
+      trim: true,
+      index: true,
+      default: undefined,
+    },
     status: {
       type: String,
       required: [true, "status is required"],
@@ -76,6 +88,17 @@ const VerificationJobSchema = new Schema<VerificationJobDocument>(
     stellarTransactionHash: {
       type: String,
       trim: true,
+      default: undefined,
+    },
+    attestationTransactionHash: {
+      type: String,
+      trim: true,
+      default: undefined,
+    },
+    certificateId: {
+      type: String,
+      trim: true,
+      index: true,
       default: undefined,
     },
 
