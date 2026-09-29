@@ -72,9 +72,10 @@ export const env = {
    */
   STELLAR_NFT_BALANCE_FN: optionalEnv("STELLAR_NFT_BALANCE_FN", "balance"),
 
-  /** Contract addresses used by off-chain authorization checks. */
+  /** Contract addresses and signer used by registry integrations. */
   STELLAR_REGISTRY_CONTRACT_ID: optionalEnv("STELLAR_REGISTRY_CONTRACT_ID", ""),
   STELLAR_ORACLE_CONTRACT_ID: optionalEnv("STELLAR_ORACLE_CONTRACT_ID", ""),
+  STELLAR_REGISTRY_ADMIN_SECRET_KEY: optionalEnv("STELLAR_REGISTRY_ADMIN_SECRET_KEY", ""),
 
   /** Max time (ms) to wait for a single Soroban RPC call before failing with 504 */
   STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "30000"), 10),
