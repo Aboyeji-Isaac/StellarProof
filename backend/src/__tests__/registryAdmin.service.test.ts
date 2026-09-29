@@ -2,6 +2,8 @@ import crypto from "crypto";
 import mongoose from "mongoose";
 import { Keypair } from "@stellar/stellar-sdk";
 import { RegistryAdminService, type RegistryAdminStore } from "../services/registryAdmin.service";
+import { RegistryContract } from "../services/contracts/RegistryContract";
+import { StrKey } from "@stellar/stellar-sdk";
 
 describe("RegistryAdminService", () => {
   const adminUserId = new mongoose.Types.ObjectId().toString();
@@ -64,5 +66,24 @@ describe("RegistryAdminService", () => {
     );
     expect(h.contract.addTeeHash).not.toHaveBeenCalled();
     expect(h.contract.addProvider).not.toHaveBeenCalled();
+  });
+
+  it("submits admin mutations through the Registry contract transaction mode", async () => {
+    const signer = Keypair.random();
+    const transactionClient = {
+      submit: jest.fn(async () => result),
+    };
+    const contract = new RegistryContract(
+      StrKey.encodeContract(crypto.randomBytes(32)),
+      signer,
+      transactionClient
+    );
+    const hash = crypto.randomBytes(32).toString("hex");
+
+    await expect(contract.addTeeHash(hash)).resolves.toEqual(result);
+    expect(transactionClient.submit).toHaveBeenCalledWith(
+      expect.objectContaining({ method: "add_tee_hash", args: expect.any(Array) }),
+      signer
+    );
   });
 });

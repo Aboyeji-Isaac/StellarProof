@@ -5,6 +5,7 @@ import { EventIngestionCursorModel } from "../models/EventIngestionCursor.model"
 import logger from "../utils/logger";
 import type { SorobanService } from "./soroban.service";
 import { verificationService } from "./verification.service";
+import { mintService } from "./mint.service";
 
 const STREAM = "oracle-provenance-events";
 
@@ -30,6 +31,10 @@ const mongooseCursorStore: EventCursorStore = {
 interface EventJobService {
   advanceFromAttestationEvent: typeof verificationService.advanceFromAttestationEvent;
   completeFromMintEvent: typeof verificationService.completeFromMintEvent;
+}
+
+interface EventMintService {
+  mintForJob(jobId: string): Promise<Record<string, unknown>>;
 }
 
 export interface EventIngestionConfig {
@@ -82,7 +87,8 @@ export class EventIngestionService {
     private readonly rpcClient: Pick<SorobanService, "getEvents">,
     private readonly jobs: EventJobService,
     private readonly cursors: EventCursorStore,
-    private readonly config: EventIngestionConfig
+    private readonly config: EventIngestionConfig,
+    private readonly minter?: EventMintService
   ) {
     if (!StrKey.isValidContract(config.oracleContractId) || !StrKey.isValidContract(config.provenanceContractId)) {
       throw new AppError(
@@ -138,7 +144,12 @@ export class EventIngestionService {
             transactionHash: event.txHash,
           });
 
-      if (job) correlated += 1;
+      if (job) {
+        correlated += 1;
+        if (name !== "certificateminted" && this.minter && job._id) {
+          await this.minter.mintForJob(String(job._id));
+        }
+      }
       else logger.warn("Soroban event did not match a verification job", {
         eventId: event.id,
         eventName: name,
@@ -201,10 +212,16 @@ export class EventIngestionService {
 export function createEventIngestionService(): EventIngestionService {
   const { env } = require("../config/env") as typeof import("../config/env");
   const { sorobanService } = require("./soroban.service") as typeof import("./soroban.service");
-  return new EventIngestionService(sorobanService, verificationService, mongooseCursorStore, {
-    oracleContractId: env.STELLAR_ORACLE_CONTRACT_ID,
-    provenanceContractId: env.STELLAR_PROVENANCE_CONTRACT_ID,
-    startLedger: env.EVENT_INGESTION_START_LEDGER || undefined,
-    limit: env.EVENT_INGESTION_LIMIT,
-  });
+  return new EventIngestionService(
+    sorobanService,
+    verificationService,
+    mongooseCursorStore,
+    {
+      oracleContractId: env.STELLAR_ORACLE_CONTRACT_ID,
+      provenanceContractId: env.STELLAR_PROVENANCE_CONTRACT_ID,
+      startLedger: env.EVENT_INGESTION_START_LEDGER || undefined,
+      limit: env.EVENT_INGESTION_LIMIT,
+    },
+    mintService
+  );
 }

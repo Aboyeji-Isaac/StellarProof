@@ -41,13 +41,20 @@ describe("EventIngestionService", () => {
       get: jest.fn(async (): Promise<{ cursor: string; latestLedger: number } | null> => null),
       save: jest.fn(async () => undefined),
     };
-    const service = new EventIngestionService(rpcClient, jobs, cursors, {
-      oracleContractId: contractId(),
-      provenanceContractId: contractId(),
-      startLedger: 100,
-      limit: 50,
-    });
-    return { service, rpcClient, jobs, cursors };
+    const minter = { mintForJob: jest.fn(async () => ({ certificateId: "1" })) };
+    const service = new EventIngestionService(
+      rpcClient,
+      jobs,
+      cursors,
+      {
+        oracleContractId: contractId(),
+        provenanceContractId: contractId(),
+        startLedger: 100,
+        limit: 50,
+      },
+      minter
+    );
+    return { service, rpcClient, jobs, cursors, minter };
   }
 
   it("filters contract events and advances a correlated job to minting", async () => {
@@ -71,6 +78,7 @@ describe("EventIngestionService", () => {
       transactionHash: chainEvent.txHash,
     });
     expect(h.cursors.save).toHaveBeenCalledWith("200-1", 200);
+    expect(h.minter.mintForJob).toHaveBeenCalledWith("job-1");
   });
 
   it("records CertificateMinted results and resumes from the durable cursor", async () => {
@@ -95,6 +103,7 @@ describe("EventIngestionService", () => {
       certificateId: "91",
       transactionHash: chainEvent.txHash,
     });
+    expect(h.minter.mintForJob).not.toHaveBeenCalled();
   });
 
   it("advances an empty page cursor without fabricating job data", async () => {

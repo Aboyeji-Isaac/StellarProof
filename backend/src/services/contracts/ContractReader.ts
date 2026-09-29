@@ -1,11 +1,8 @@
 import { rpc, type xdr } from "@stellar/stellar-sdk";
 import { StatusCodes } from "http-status-codes";
 import { AppError } from "../../errors/AppError";
-import { sorobanService, type SorobanService } from "../soroban.service";
-import {
-  buildContractCallTransaction,
-  type ContractCall,
-} from "../../utils/transactionBuilder";
+import type { SorobanService } from "../soroban.service";
+import type { ContractCall } from "../../utils/transactionBuilder";
 
 export interface ContractQueryClient {
   invoke(call: ContractCall): Promise<xdr.ScVal>;
@@ -17,15 +14,23 @@ export interface ContractQueryClient {
  * require a transaction source even though no transaction is submitted.
  */
 export class SorobanContractQueryClient implements ContractQueryClient {
+  private readonly soroban: Pick<
+    SorobanService,
+    "loadAccount" | "simulate" | "networkPassphrase"
+  >;
+
   constructor(
     private readonly sourceAccount: string,
-    private readonly soroban: Pick<
+    soroban?: Pick<
       SorobanService,
       "loadAccount" | "simulate" | "networkPassphrase"
-    > = sorobanService
-  ) {}
+    >
+  ) {
+    this.soroban = soroban ?? (require("../soroban.service") as typeof import("../soroban.service")).sorobanService;
+  }
 
   async invoke(call: ContractCall): Promise<xdr.ScVal> {
+    const { buildContractCallTransaction } = require("../../utils/transactionBuilder") as typeof import("../../utils/transactionBuilder");
     const source = await this.soroban.loadAccount(this.sourceAccount);
     const transaction = buildContractCallTransaction(
       source,

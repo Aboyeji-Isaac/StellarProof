@@ -32,6 +32,18 @@ function optionalPositiveIntEnv(key: string, fallback: number): number {
   return value;
 }
 
+function rpcUrlList(): string[] {
+  return Array.from(
+    new Set(
+      [
+        process.env.STELLAR_RPC_URL,
+        process.env.STELLAR_RPC_URL_2,
+        process.env.STELLAR_RPC_URL_3,
+      ].filter((value): value is string => Boolean(value))
+    )
+  );
+}
+
 export const env = {
   NODE_ENV: optionalEnv("NODE_ENV", "development"),
   PORT: parseInt(optionalEnv("PORT", "4000"), 10),
@@ -89,8 +101,6 @@ export const env = {
     120_000
   ),
 
-  /** Max time (ms) to wait for a single Soroban RPC call before failing with 504 */
-  STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "30000"), 10),
   /** Allowed CORS origin for the frontend. */
   CORS_ORIGIN: optionalEnv("CORS_ORIGIN", "http://localhost:3000"),
 

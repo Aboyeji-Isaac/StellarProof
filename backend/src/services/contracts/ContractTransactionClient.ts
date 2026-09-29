@@ -1,11 +1,8 @@
 import { StatusCodes } from "http-status-codes";
 import { Keypair } from "@stellar/stellar-sdk";
 import { AppError } from "../../errors/AppError";
-import { sorobanService, type SorobanService } from "../soroban.service";
-import {
-  buildSignedContractTransaction,
-  type ContractCall,
-} from "../../utils/transactionBuilder";
+import type { SorobanService } from "../soroban.service";
+import type { ContractCall } from "../../utils/transactionBuilder";
 
 export interface ContractTransactionResult {
   transactionHash: string;
@@ -20,20 +17,32 @@ const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 export class SorobanContractTransactionClient implements ContractTransactionClient {
+  private readonly soroban: Pick<
+    SorobanService,
+    | "loadAccount"
+    | "simulate"
+    | "sendTransaction"
+    | "getTransaction"
+    | "networkPassphrase"
+  >;
+
   constructor(
-    private readonly soroban: Pick<
+    soroban?: Pick<
       SorobanService,
       | "loadAccount"
       | "simulate"
       | "sendTransaction"
       | "getTransaction"
       | "networkPassphrase"
-    > = sorobanService,
+    >,
     private readonly confirmationTimeoutMs = 120_000,
     private readonly pollIntervalMs = 1_000
-  ) {}
+  ) {
+    this.soroban = soroban ?? (require("../soroban.service") as typeof import("../soroban.service")).sorobanService;
+  }
 
   async submit(call: ContractCall, signer: Keypair): Promise<ContractTransactionResult> {
+    const { buildSignedContractTransaction } = require("../../utils/transactionBuilder") as typeof import("../../utils/transactionBuilder");
     const signed = await buildSignedContractTransaction({
       client: {
         getAccount: (address) => this.soroban.loadAccount(address),
