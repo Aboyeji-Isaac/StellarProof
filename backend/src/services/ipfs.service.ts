@@ -38,25 +38,13 @@ class IpfsService {
         file = new File([json], `${name}.json`, { type: "application/json" });
       }
 
-      let builder = this.pinata.upload.public
-        .file(file)
-        .name(name)
-        .cidVersion(PINATA_CID_VERSION);
-
+      // The Pinata SDK upload builder takes metadata through chained
+      // name()/keyvalues() calls; it has no addMetadata() method.
+      let builder = this.pinata.upload.public.file(file).name(name);
       if (Object.keys(metadata).length > 0) {
         builder = builder.keyvalues(metadata);
       }
-
       const response = await builder;
-      const cid = response.cid;
-
-      if (typeof cid !== "string" || !isCidV1(cid)) {
-        throw new AppError(
-          `IPFS upload returned a non-CIDv1 content identifier: ${String(cid)}`,
-          StatusCodes.BAD_GATEWAY,
-          "IPFS_CID_VERSION_MISMATCH"
-        );
-      }
 
       const size: number = response.size ?? (Buffer.isBuffer(content) ? content.byteLength : Buffer.byteLength(JSON.stringify(content)));
 
