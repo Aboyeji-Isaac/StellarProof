@@ -70,4 +70,17 @@ router.post(
   manifestController.createManifest.bind(manifestController)
 );
 
+/**
+ * POST /api/v1/manifests/:id/ipfs
+ * Pins the manifest JSON (sorted keys, includes manifestHash) to IPFS via
+ * Pinata and persists ipfsCid/ipfsUrl on the Manifest. Only the manifest's
+ * creator may publish it. Idempotent: returns 200 if already pinned.
+ * Returns: { success, data: { manifestId, manifestHash, manifestCid, ipfsUrl, ipfsUploadedAt, newlyPinned } }
+ */
+router.post(
+  "/:id/ipfs",
+  verifyJWT,
+  manifestController.uploadManifestToIpfs.bind(manifestController)
+);
+
 export default router;
