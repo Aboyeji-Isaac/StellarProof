@@ -29,6 +29,7 @@ import {
   type OracleConfig,
   type VerificationWorkerConfig,
 } from "../config/oracle";
+import { env } from "../config/env";
 import { AppError } from "../errors/AppError";
 import {
   SorobanTransactionError,
@@ -45,6 +46,10 @@ import {
   type SpvVerificationResult,
 } from "../services/spvVerifier.service";
 import { verificationService } from "../services/verification.service";
+import { RegistryAuthorizationService } from "../services/registryAuthorization.service";
+import { SorobanContractQueryClient } from "../services/contracts/ContractReader";
+import { RegistryContract } from "../services/contracts/RegistryContract";
+import { OracleContract } from "../services/contracts/OracleContract";
 import {
   LeaseLostError,
   verificationRequestEventService,
@@ -75,6 +80,7 @@ export interface VerificationWorkerDeps {
   attestations: {
     createAttestation(input: AttestationInput, keypair: Keypair, codeMeasurementHash: string): Attestation;
   };
+  authorization?: Pick<RegistryAuthorizationService, "assertAuthorized">;
   soroban: Pick<
     SorobanService,
     "buildMintTransaction" | "submitTransaction" | "getTransactionWithConfirmation"
@@ -323,6 +329,17 @@ export class VerificationWorker {
 
     // Stage 2: attestation transaction.
     if (job.status === VerificationStatus.TEE_VERIFYING) {
+      if (!job.codeMeasurementHash) {
+        throw new AppError(
+          "Cannot submit attestation without a TEE measurement hash",
+          409,
+          "MISSING_TEE_MEASUREMENT"
+        );
+      }
+      await this.deps.authorization?.assertAuthorized(
+        job.codeMeasurementHash,
+        this.deps.oracle.keypair.publicKey()
+      );
       const txHash = await this.submitAttestation(event, job, manifestHash);
       job = await jobs.updateJobStatus(id, {
         status: VerificationStatus.MINTING,
@@ -499,13 +516,21 @@ export class VerificationWorker {
 
 /** Builds a worker wired to the production services and configuration. */
 export function createVerificationWorker(): VerificationWorker {
+  const oracle = loadOracleConfig();
+  const queryClient = new SorobanContractQueryClient(oracle.keypair.publicKey());
+  const authorization = new RegistryAuthorizationService(
+    new RegistryContract(env.STELLAR_REGISTRY_CONTRACT_ID, queryClient),
+    new OracleContract(env.STELLAR_ORACLE_CONTRACT_ID, queryClient)
+  );
+
   return new VerificationWorker({
     events: verificationRequestEventService,
     jobs: verificationService,
     verifier: spvVerifierService,
     attestations: attestationService,
+    authorization,
     soroban: sorobanService,
-    oracle: loadOracleConfig(),
+    oracle,
     config: loadVerificationWorkerConfig(),
     logger,
   });
