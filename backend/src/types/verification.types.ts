@@ -97,6 +97,8 @@ export interface IVerificationJob {
 
   /** Stellar/Soroban transaction hash for the on-chain certificate mint. */
   stellarTransactionHash?: string;
+  /** Certificate identifier returned by the Provenance contract. */
+  certificateId?: string;
 
   // -- Failure data ---------------------------------------------------------
 

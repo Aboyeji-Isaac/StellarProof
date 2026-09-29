@@ -78,6 +78,12 @@ const VerificationJobSchema = new Schema<VerificationJobDocument>(
       trim: true,
       default: undefined,
     },
+    certificateId: {
+      type: String,
+      trim: true,
+      index: true,
+      default: undefined,
+    },
 
     // Failure fields
     errorMessage: {

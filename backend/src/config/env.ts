@@ -72,6 +72,14 @@ export const env = {
    */
   STELLAR_NFT_BALANCE_FN: optionalEnv("STELLAR_NFT_BALANCE_FN", "balance"),
 
+  /** Oracle signer and Provenance contract used by the mint trigger. */
+  STELLAR_ORACLE_SECRET_KEY: optionalEnv("STELLAR_ORACLE_SECRET_KEY", ""),
+  STELLAR_PROVENANCE_CONTRACT_ID: optionalEnv("STELLAR_PROVENANCE_CONTRACT_ID", ""),
+  STELLAR_TX_CONFIRMATION_TIMEOUT_MS: optionalPositiveIntEnv(
+    "STELLAR_TX_CONFIRMATION_TIMEOUT_MS",
+    120_000
+  ),
+
   /** Max time (ms) to wait for a single Soroban RPC call before failing with 504 */
   STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "30000"), 10),
   /** Allowed CORS origin for the frontend. */
