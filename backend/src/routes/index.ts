@@ -14,6 +14,7 @@ import ipfsRoutes from "./ipfs.routes";
 import mediaRoutes from "./media.routes";
 import storageRoutes from "./v1/storage.routes";
 import verifyRoutes from "./v1/verification.routes";
+import networkRoutes from "./network.routes";
 
 const router = Router();
 
@@ -40,5 +41,6 @@ router.use("/api/v1/ipfs", ipfsRoutes);
 router.use("/api/v1/media", mediaRoutes);
 router.use("/api/v1/storage", storageRoutes);
 router.use("/api/v1/verify", verifyRoutes);
+router.use("/api/v1/network", networkRoutes);
 
 export default router;

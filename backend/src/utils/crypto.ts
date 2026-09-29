@@ -3,7 +3,7 @@ import crypto from 'crypto';
 /**
  * Recursively sorts the keys of an object to ensure deterministic stringification.
  */
-const sortObjectKeys = (obj: any): any => {
+export const sortObjectKeys = (obj: any): any => {
   if (obj === null || typeof obj !== 'object') {
     return obj;
   }
@@ -23,11 +23,18 @@ const sortObjectKeys = (obj: any): any => {
 };
 
 /**
+ * Serializes a JSON object with recursively sorted keys so the same data
+ * always produces byte-identical output (and therefore the same hash / CID).
+ */
+export const canonicalStringify = (data: Record<string, any>): string => {
+  return JSON.stringify(sortObjectKeys(data));
+};
+
+/**
  * Generates a deterministic SHA256 hash from a JSON object.
  */
 export const generateDeterministicHash = (data: Record<string, any>): string => {
-  const sortedObject = sortObjectKeys(data);
-  const jsonString = JSON.stringify(sortedObject);
+  const jsonString = canonicalStringify(data);
   
   return crypto.createHash('sha256').update(jsonString).digest('hex');
 };

@@ -38,9 +38,27 @@ const upload = multer({
  *   - 400: Invalid input, provider or contentHash format
  *   - 422: contentHash does not match the uploaded bytes (nothing is stored)
  *   - 401: Authentication required
- *   - 502: Provider error (upstream failure)
+ *   - 502: Cloudinary error (requested provider was cloudinary)
+ *   - 503: IPFS failed and the Cloudinary fallback also failed
+ *
+ * When storageProvider is "ipfs" and pinning fails or times out, the file is
+ * stored on Cloudinary instead; the response reports provider,
+ * requestedProvider and fallbackUsed.
  */
 router.post('/upload', upload.single('file'), uploadFile);
+
+/**
+ * POST /api/v1/storage/media
+ * Upload a media file (defaults to IPFS) and create the linked Asset.
+ * IPFS pins are always requested as CIDv1; the returned IpfsHash is stored
+ * as the Asset's storageReferenceId and returned as `mediaCid`.
+ *
+ * Response:
+ *   - 201: { assetId, storageProvider, storageReferenceId, url, mediaCid, cidVersion }
+ *   - 400: Missing file or invalid userId
+ *   - 401: Authentication required
+ *   - 502: Provider error or non-CIDv1 response
+ */
 router.post('/media', upload.single('file'), uploadMedia);
 router.post('/manifest', uploadManifest);
 
