@@ -24,6 +24,7 @@ import type {
   UpdateVerificationStatusDTO,
   OracleCallbackDTO,
   IVerificationJob,
+  ListVerificationJobsQuery,
 } from "../types/verification.types";
 import { VerificationStatus } from "../types/verification.types";
 
@@ -145,20 +146,57 @@ export class VerificationController {
   }
 
   /**
-   * GET /api/v1/verification/jobs?ownerPublicKey=G...
-   * Lists all VerificationJobs belonging to the given owner.
+   * GET /api/v1/verification/jobs
+   * Lists the caller's jobs with pagination, status, date range, and contentHash search.
    */
   async listJobsByOwner(
-    req: Request,
+    _req: Request,
     res: Response,
     next: NextFunction
   ): Promise<void> {
     try {
-      const { ownerPublicKey } = req.query as { ownerPublicKey: string };
-      const jobs = await verificationService.getJobsByOwner(ownerPublicKey);
+      const ownerPublicKey = res.locals.ownerPublicKey as string | undefined;
+      const parsed = res.locals.listJobsQuery as Omit<ListVerificationJobsQuery, "ownerPublicKey"> | undefined;
+      if (!ownerPublicKey || !parsed) {
+        throw new AppError("Verification job not found", StatusCodes.NOT_FOUND, "JOB_NOT_FOUND");
+      }
+
+      const result = await verificationService.listJobs({
+        ...parsed,
+        ownerPublicKey,
+      });
+
       res.status(StatusCodes.OK).json({
         success: true,
-        data: jobs,
+        data: result.jobs,
+        total: result.total,
+        limit: result.limit,
+        skip: result.skip,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /**
+   * GET /api/v1/verification/jobs/stats
+   * Counts the caller's jobs by status and returns the success rate plus daily trends.
+   */
+  async getJobStats(
+    _req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> {
+    try {
+      const ownerPublicKey = res.locals.ownerPublicKey as string | undefined;
+      if (!ownerPublicKey) {
+        throw new AppError("Verification job not found", StatusCodes.NOT_FOUND, "JOB_NOT_FOUND");
+      }
+
+      const stats = await verificationService.getJobStats(ownerPublicKey);
+      res.status(StatusCodes.OK).json({
+        success: true,
+        data: stats,
       });
     } catch (err) {
       next(err);
