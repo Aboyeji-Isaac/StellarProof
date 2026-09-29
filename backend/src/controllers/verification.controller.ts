@@ -1,5 +1,5 @@
-/**
- * Verification Controller – thin HTTP adapter layer.
+﻿/**
+ * Verification Controller - thin HTTP adapter layer.
  *
  * Each method:
  *  1. Extracts validated data from the request (body / params / query are
@@ -82,6 +82,7 @@ export class VerificationController {
         ownerPublicKey: user.stellarPublicKey || manifest.creator,
         contentHash: manifest.contentHash,
         status: VerificationStatus.PENDING,
+        timeline: [{ stage: VerificationStatus.PENDING, at: new Date() }],
       });
 
       res.status(StatusCodes.CREATED).json({
