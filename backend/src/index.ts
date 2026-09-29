@@ -5,6 +5,7 @@ import { env } from "./config/env";
 import { startCleanupJob } from "./jobs/cleanup.job";
 import { startStorageHealthJob } from "./jobs/storageHealth.job";
 import { startVerificationTimeoutJob } from "./jobs/verificationTimeout.job";
+import { startEventIngestionJob } from "./jobs/eventIngestion.job";
 
 function hasCloudinaryConfig(): boolean {
   return Boolean(
@@ -19,6 +20,10 @@ async function main(): Promise<void> {
 
   startVerificationTimeoutJob();
   startStorageHealthJob();
+  const stopEventIngestion =
+    env.STELLAR_ORACLE_CONTRACT_ID && env.STELLAR_PROVENANCE_CONTRACT_ID
+      ? startEventIngestionJob()
+      : undefined;
 
   if (hasCloudinaryConfig()) {
     initCloudinary();
@@ -33,6 +38,7 @@ async function main(): Promise<void> {
   });
 
   const shutdown = async (signal: string): Promise<void> => {
+    stopEventIngestion?.();
     console.log(`[Server] ${signal} received — shutting down gracefully`);
     server.close(async () => {
       await disconnectDatabase();
