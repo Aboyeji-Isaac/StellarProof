@@ -77,6 +77,35 @@ const ManifestSchema: Schema = new Schema(
   }
 );
 
+/**
+ * Core business fields covered by manifestHash.
+ * _id, __v, createdAt, updatedAt and IPFS fields are excluded so the hash is
+ * purely based on the manifest content.
+ */
+export interface ManifestHashPayload {
+  contentHash: string;
+  creator: string;
+  creatorId?: string;
+  timestamp?: string;
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * Builds the payload hashed into manifestHash. Metadata is read from the
+ * plain-object form so arbitrary (non-schema) metadata keys are included.
+ */
+export function buildManifestHashPayload(manifest: IManifest): ManifestHashPayload {
+  const plain = manifest.toObject({ depopulate: true, getters: false, virtuals: false });
+
+  return {
+    contentHash: manifest.contentHash,
+    creator: manifest.creator,
+    creatorId: manifest.creatorId ? manifest.creatorId.toString() : undefined,
+    timestamp: manifest.timestamp ? manifest.timestamp.toISOString() : undefined,
+    metadata: (plain.metadata as Record<string, unknown> | undefined) || {},
+  };
+}
+
 // --- Pre-save hook for deterministic hashing ---
 ManifestSchema.pre<IManifest>('save', function (next) {
   // Only recalculate the hash if relevant content fields have been modified
@@ -88,18 +117,7 @@ ManifestSchema.pre<IManifest>('save', function (next) {
     this.isModified('metadata')
   ) {
     try {
-      // Construct the payload to hash. 
-      // We explicitly exclude _id, __v, createdAt, and updatedAt 
-      // so the hash is purely based on the core business data.
-      const payloadToHash = {
-        contentHash: this.contentHash,
-        creator: this.creator,
-        creatorId: this.creatorId ? this.creatorId.toString() : undefined,
-        timestamp: this.timestamp ? this.timestamp.toISOString() : undefined,
-        metadata: this.metadata || {},
-      };
-
-      this.manifestHash = generateDeterministicHash(payloadToHash);
+      this.manifestHash = generateDeterministicHash(buildManifestHashPayload(this));
     } catch (error) {
       return next(error as Error);
     }

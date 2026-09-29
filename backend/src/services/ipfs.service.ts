@@ -48,18 +48,19 @@ class IpfsService {
         file = new File([json], `${name}.json`, { type: "application/json" });
       }
 
-      // In Pinata SDK v3, metadata is often handled via the builder or options
-      // Casting to any to bypass the specific builder type issue if addMetadata is known to work at runtime
-      const response = await (this.pinata.upload.public.file(file) as any).addMetadata({
-        name,
-        keyValues: metadata,
-      });
+      // The Pinata SDK upload builder takes metadata through chained
+      // name()/keyvalues() calls; it has no addMetadata() method.
+      let builder = this.pinata.upload.public.file(file).name(name);
+      if (Object.keys(metadata).length > 0) {
+        builder = builder.keyvalues(metadata);
+      }
+      const response = await builder;
 
-      const cid: string = response.cid;
       const size: number = response.size ?? (Buffer.isBuffer(content) ? content.byteLength : Buffer.byteLength(JSON.stringify(content)));
 
       return {
         cid,
+        cidVersion: 1,
         size,
         name: response.name ?? name,
         timestamp: new Date().toISOString(),
