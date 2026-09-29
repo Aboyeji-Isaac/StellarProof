@@ -1,8 +1,8 @@
 /**
  * Builds the oracle's signed attestation over a successful SPV verification.
  *
- * The attestation hash is a deterministic SHA-256 over the verified facts, so
- * a retried request yields the same hash. The signature is the oracle
+ * The attestation hash is a deterministic SHA-256 over the verified facts, so a
+ * retried request yields the same hash. The signature is the oracle
  * keypair's Ed25519 signature over the raw 32-byte hash.
  */
 import { Keypair } from "@stellar/stellar-sdk";
@@ -27,7 +27,7 @@ export interface Attestation {
   codeMeasurementHash: string;
 }
 
-class AttestationService {
+export class AttestationService {
   createAttestation(
     input: AttestationInput,
     keypair: Keypair,

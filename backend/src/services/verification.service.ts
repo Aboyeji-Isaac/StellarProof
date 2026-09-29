@@ -70,7 +70,7 @@ async function getJobsByOwner(ownerPublicKey: string): Promise<IVerificationJob[
 async function updateJobStatus(
   id: string,
   dto: UpdateVerificationStatusDTO
-): Promise<IVerificationJob> {
+}): Promise<IVerificationJob> {
   assertValidObjectId(id);
 
   const job = await VerificationJobModel.findById(id);
