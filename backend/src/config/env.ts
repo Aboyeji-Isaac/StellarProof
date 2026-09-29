@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Centralised environment configuration.
  * All process.env reads happen here. Downstream modules import from `env`
  * and never access process.env directly.
@@ -128,9 +128,29 @@ export const env = {
   /** Pinata public gateway base URL */
   PINATA_GATEWAY_URL: optionalEnv("PINATA_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs"),
 
+  /**
+   * Bounded polling window used to observe Pinata's real pin state after an
+   * upload, so responses report `pinning` until the pin actually propagates.
+   */
+  IPFS_PIN_POLL_INTERVAL_MS: optionalPositiveIntEnv("IPFS_PIN_POLL_INTERVAL_MS", 500),
+  IPFS_PIN_POLL_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_PIN_POLL_TIMEOUT_MS", 6_000),
+  IPFS_PIN_POLL_MAX_ATTEMPTS: optionalPositiveIntEnv("IPFS_PIN_POLL_MAX_ATTEMPTS", 8),
+
+  /** Max time (ms) to wait for the post-upload gateway availability probe */
+  IPFS_AVAILABILITY_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_AVAILABILITY_TIMEOUT_MS", 4_000),
+
   /** Max time (ms) to wait for the IPFS gateway when resolving a CID */
   IPFS_RESOLVE_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_RESOLVE_TIMEOUT_MS", 15_000),
 
   /** Max bytes downloaded from the IPFS gateway when resolving a CID (defaults to the 100 MB upload limit) */
   IPFS_RESOLVE_MAX_BYTES: optionalPositiveIntEnv("IPFS_RESOLVE_MAX_BYTES", 100 * 1024 * 1024),
+
+  /** Per-attempt timeout (ms) for a single IPFS upload request */
+  IPFS_UPLOAD_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_UPLOAD_TIMEOUT_MS", 30_000),
+
+  /** Additional IPFS upload attempts after the first failure (0 disables retries) */
+  IPFS_UPLOAD_MAX_RETRIES: optionalNonNegativeIntEnv("IPFS_UPLOAD_MAX_RETRIES", 2),
+
+  /** Base delay (ms) for the exponential backoff between IPFS upload attempts */
+  IPFS_UPLOAD_BACKOFF_MS: optionalPositiveIntEnv("IPFS_UPLOAD_BACKOFF_MS", 500),
 } as const;

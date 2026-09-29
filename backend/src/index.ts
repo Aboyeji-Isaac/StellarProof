@@ -3,7 +3,6 @@ import { initCloudinary } from "./config/cloudinary";
 import { connectDatabase, disconnectDatabase } from "./config/database";
 import { env } from "./config/env";
 import { startCleanupJob } from "./jobs/cleanup.job";
-import { startStorageHealthJob } from "./jobs/storageHealth.job";
 import { startVerificationTimeoutJob } from "./jobs/verificationTimeout.job";
 import { startEventIngestionJob } from "./jobs/eventIngestion.job";
 
@@ -40,6 +39,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     stopEventIngestion?.();
     console.log(`[Server] ${signal} received — shutting down gracefully`);
+    await statusStreamService.disconnectAll();
     server.close(async () => {
       await disconnectDatabase();
       console.log("[Server] HTTP server closed");
