@@ -32,15 +32,16 @@ function optionalPositiveIntEnv(key: string, fallback: number): number {
   return value;
 }
 
-function optionalNonNegativeIntEnv(key: string, fallback: number): number {
-  const raw = process.env[key];
-  if (raw === undefined || raw === "") return fallback;
-  const value = Number(raw);
-  if (!Number.isInteger(value) || value < 0) {
-    console.error(`[Config] ${key} must be a non-negative integer, got "${raw}"`);
-    process.exit(1);
-  }
-  return value;
+function rpcUrlList(): string[] {
+  return Array.from(
+    new Set(
+      [
+        process.env.STELLAR_RPC_URL,
+        process.env.STELLAR_RPC_URL_2,
+        process.env.STELLAR_RPC_URL_3,
+      ].filter((value): value is string => Boolean(value))
+    )
+  );
 }
 
 export const env = {
@@ -83,8 +84,23 @@ export const env = {
    */
   STELLAR_NFT_BALANCE_FN: optionalEnv("STELLAR_NFT_BALANCE_FN", "balance"),
 
-  /** Max time (ms) to wait for a single Soroban RPC call before failing with 504 */
-  STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "30000"), 10),
+  /** Contract addresses, signers, and event ingestion settings. */
+  STELLAR_REGISTRY_CONTRACT_ID: optionalEnv("STELLAR_REGISTRY_CONTRACT_ID", ""),
+  STELLAR_ORACLE_CONTRACT_ID: optionalEnv("STELLAR_ORACLE_CONTRACT_ID", ""),
+  STELLAR_REGISTRY_ADMIN_SECRET_KEY: optionalEnv("STELLAR_REGISTRY_ADMIN_SECRET_KEY", ""),
+  STELLAR_ORACLE_SECRET_KEY: optionalEnv("STELLAR_ORACLE_SECRET_KEY", ""),
+  STELLAR_PROVENANCE_CONTRACT_ID: optionalEnv("STELLAR_PROVENANCE_CONTRACT_ID", ""),
+  EVENT_INGESTION_START_LEDGER: parseInt(optionalEnv("EVENT_INGESTION_START_LEDGER", "0"), 10),
+  EVENT_INGESTION_LIMIT: optionalPositiveIntEnv("EVENT_INGESTION_LIMIT", 100),
+  EVENT_INGESTION_POLL_INTERVAL_MS: optionalPositiveIntEnv(
+    "EVENT_INGESTION_POLL_INTERVAL_MS",
+    5_000
+  ),
+  STELLAR_TX_CONFIRMATION_TIMEOUT_MS: optionalPositiveIntEnv(
+    "STELLAR_TX_CONFIRMATION_TIMEOUT_MS",
+    120_000
+  ),
+
   /** Allowed CORS origin for the frontend. */
   CORS_ORIGIN: optionalEnv("CORS_ORIGIN", "http://localhost:3000"),
 

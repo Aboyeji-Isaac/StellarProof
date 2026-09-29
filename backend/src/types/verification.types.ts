@@ -95,6 +95,10 @@ export interface IVerificationJob {
   /** SHA-256 hex digest of the content being verified. */
   contentHash: string;
 
+  /** Correlation identifiers emitted by the Oracle and Provenance contracts. */
+  manifestHash?: string;
+  requestId?: string;
+
   /** Current lifecycle state of the job. */
   status: VerificationStatus;
 
@@ -116,6 +120,10 @@ export interface IVerificationJob {
 
   /** Stellar/Soroban transaction hash for the on-chain certificate mint. */
   stellarTransactionHash?: string;
+  /** Transaction that emitted the accepted attestation event. */
+  attestationTransactionHash?: string;
+  /** Certificate identifier returned by the Provenance contract. */
+  certificateId?: string;
 
   // -- Failure data ---------------------------------------------------------
 
@@ -137,6 +145,8 @@ export interface IVerificationJob {
 export interface CreateVerificationJobDTO {
   ownerPublicKey: string;
   contentHash: string;
+  manifestHash?: string;
+  requestId?: string;
   webhookUrl?: string;
 }
 
