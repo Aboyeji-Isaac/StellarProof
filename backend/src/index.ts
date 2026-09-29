@@ -4,7 +4,8 @@ import { connectDatabase, disconnectDatabase } from "./config/database";
 import { env } from "./config/env";
 import { startCleanupJob } from "./jobs/cleanup.job";
 import { startVerificationTimeoutJob } from "./jobs/verificationTimeout.job";
-import { startManifestRehashWorker } from "./jobs/verificationWorker";
+import { statusStreamService } from "./services/statusStream.service";
+
 function hasCloudinaryConfig(): boolean {
   return Boolean(
     process.env.CLOUDINARY_CLOUD_NAME &&
@@ -32,6 +33,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`[Server] ${signal} received — shutting down gracefully`);
+    await statusStreamService.disconnectAll();
     server.close(async () => {
       await disconnectDatabase();
       console.log("[Server] HTTP server closed");

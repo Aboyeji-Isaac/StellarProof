@@ -56,8 +56,63 @@ class StorageOrchestratorService {
       );
     }
 
-    // Delegate to provider (with Cloudinary fallback for IPFS)
-    const { uploadResult, fallbackReason } = await this.uploadWithFallback(request);
+    if (request.assetId !== undefined && !mongoose.Types.ObjectId.isValid(request.assetId)) {
+      throw new StorageError(request.storageProvider, 'orchestrate', 'Invalid assetId', 400);
+    }
+
+    const contentHash = sha256Hex(request.buffer);
+
+    // Skip the provider entirely when these exact bytes are already pinned
+    if (request.storageProvider === 'ipfs') {
+      const existing = await this.runDbOperation(request.storageProvider, 'dedup-lookup', () =>
+        StorageRecord.findOne({ provider: 'ipfs', contentHash }).sort({ createdAt: 1 }).exec()
+      );
+      if (existing) {
+        return this.reuseRecord(existing, request, contentHash);
+      }
+    }
+
+    // Delegate to provider; IPFS media uploads fall back to Cloudinary
+    let uploadResult: UploadResult;
+    let fallbackFrom: StorageProvider | undefined;
+
+    try {
+      uploadResult = await this.uploadToProvider(request.storageProvider, request);
+    } catch (primaryError) {
+      if (!this.canFallBack(request)) {
+        throw primaryError;
+      }
+
+      const primaryReason = errorMessage(primaryError);
+      logger.warn('IPFS upload failed; falling back to Cloudinary', {
+        originalFilename: request.originalname,
+        userId: request.userId,
+        reason: primaryReason,
+      });
+
+      try {
+        uploadResult = await this.uploadToProvider('cloudinary', request);
+        fallbackFrom = request.storageProvider;
+      } catch (fallbackError) {
+        throw new StorageError(
+          'cloudinary',
+          'fallback',
+          `IPFS upload failed (${primaryReason}) and Cloudinary fallback failed (${errorMessage(fallbackError)})`,
+          502,
+        );
+      }
+    }
+
+    // Provider returned a CID we already track: reuse that record
+    const cid = uploadResult.cid;
+    if (cid) {
+      const existing = await this.runDbOperation(request.storageProvider, 'dedup-lookup', () =>
+        StorageRecord.findOne({ cid }).exec()
+      );
+      if (existing) {
+        return this.reuseRecord(existing, request, contentHash);
+      }
+    }
 
     // Persist result to MongoDB
     const storageRecord = new StorageRecord({

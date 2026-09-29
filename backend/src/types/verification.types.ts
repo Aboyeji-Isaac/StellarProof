@@ -170,4 +170,20 @@ export interface OracleCallbackDTO {
   teeSignature: string; // Oracle signature (hex/base64 string)
 }
 
+// ---------------------------------------------------------------------------
+// SSE Types
+// ---------------------------------------------------------------------------
 
+/** Status event payload sent to SSE subscribers. */
+export interface StatusEventPayload {
+  jobId: string;
+  status: VerificationStatus;
+  ownerPublicKey: string;
+  contentHash: string;
+  teeAttestationHash: string | null;
+  stellarTransactionHash: string | null;
+  errorMessage: string | null;
+  createdAt?: Date;
+  updatedAt?: Date;
+  [key: string]: unknown;
+}

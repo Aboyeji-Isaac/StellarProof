@@ -18,10 +18,12 @@ import Asset from "../models/Asset.model";
 import Manifest from "../models/Manifest.model";
 import { VerificationJobModel } from "../models/verificationJob.model";
 import { verificationService } from "../services/verification.service";
+import { statusStreamService } from "../services/statusStream.service";
 import type {
   CreateVerificationJobDTO,
   UpdateVerificationStatusDTO,
   OracleCallbackDTO,
+  IVerificationJob,
 } from "../types/verification.types";
 import { VerificationStatus } from "../types/verification.types";
 
@@ -209,6 +211,49 @@ export class VerificationController {
       });
     } catch (err) {
       next(err);
+    }
+  }
+
+  /**
+   * GET /api/v1/verification/jobs/:id/stream
+   * SSE endpoint that streams live status transitions for a VerificationJob.
+   * Sets appropriate SSE headers, subscribes the response to the job,
+   * sends the initial status event, and handles client disconnect cleanup.
+   */
+  async subscribe(
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> {
+    try {
+      const jobId = req.params.id;
+
+      if (!mongoose.Types.ObjectId.isValid(jobId)) {
+        throw new AppError("Invalid job ID", StatusCodes.BAD_REQUEST, "INVALID_ID");
+      }
+
+      const job = await VerificationJobModel.findById(jobId).lean<IVerificationJob>();
+      if (!job) {
+        throw new AppError(
+          `Verification job not found: '${jobId}'`,
+          StatusCodes.NOT_FOUND,
+          "JOB_NOT_FOUND"
+        );
+      }
+
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.flushHeaders();
+
+      statusStreamService.subscribe(jobId, res);
+      statusStreamService.sendStatus(res, job);
+    } catch (err) {
+      if (!res.headersSent) {
+        next(err);
+      }
     }
   }
 }

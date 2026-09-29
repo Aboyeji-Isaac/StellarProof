@@ -17,6 +17,7 @@ import type {
   UpdateVerificationStatusDTO,
   OracleCallbackDTO,
 } from "../types/verification.types";
+import { statusStreamService } from "./statusStream.service";
 
 function assertValidObjectId(id: string): void {
   if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -64,6 +65,11 @@ async function createJob(dto: CreateVerificationJobDTO): Promise<IVerificationJo
     ...(dto.webhookUrl ? { webhookUrl: dto.webhookUrl } : {}),
     timeline: [{ stage: VerificationStatus.PENDING, at: new Date() }],
   });
+
+  await statusStreamService.broadcast(
+    String(job._id),
+    VerificationStatus.PENDING
+  );
 
   return job.toObject<IVerificationJob>();
 }
@@ -152,13 +158,17 @@ async function updateJobStatus(
 
   await job.save();
 
+  await statusStreamService.broadcast(String(job._id), nextStatus, {
+    teeAttestationHash: job.teeAttestationHash,
+    teeSignature: job.teeSignature,
+    codeMeasurementHash: job.codeMeasurementHash,
+    stellarTransactionHash: job.stellarTransactionHash,
+    errorMessage: job.errorMessage,
+  });
+
   return job.toObject<IVerificationJob>();
 }
 
-/**
- * Handles the TEE oracle callback which provides attestation data.
- * This stores the attestation fields and advances the job to `minting`.
- */
 async function receiveOracleAttestation(
   dto: OracleCallbackDTO
 ): Promise<IVerificationJob> {
@@ -176,7 +186,6 @@ async function receiveOracleAttestation(
   const currentStatus = job.status as VerificationStatus;
   const nextStatus = VerificationStatus.MINTING;
 
-  // Ensure the state machine permits this transition
   assertValidTransition(currentStatus, nextStatus);
 
   job.teeAttestationHash = dto.teeAttestationHash;
@@ -186,6 +195,11 @@ async function receiveOracleAttestation(
   recordTimelineEntry(job, nextStatus);
 
   await job.save();
+
+  await statusStreamService.broadcast(String(job._id), nextStatus, {
+    teeAttestationHash: job.teeAttestationHash,
+    teeSignature: job.teeSignature,
+  });
 
   return job.toObject<IVerificationJob>();
 }
