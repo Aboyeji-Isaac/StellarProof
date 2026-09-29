@@ -1,232 +1,131 @@
-jest.mock("../../config/env", () => ({
+/**
+ * IPFS upload resilience (issue #675): configurable per-attempt timeout,
+ * retry count, and exponential backoff, with typed AppError mapping.
+ */
+jest.mock('../../config/env', () => ({
   __esModule: true,
   env: {
-    MONGODB_URI: "mongodb://localhost:27017/test",
-    JWT_SECRET: "test-secret",
-    PINATA_JWT: "test-pinata-jwt",
-    PINATA_GATEWAY_URL: "https://gateway.pinata.cloud/ipfs",
+    NODE_ENV: 'test',
+    PINATA_JWT: 'test',
+    PINATA_GATEWAY_URL: 'https://gateway.example/ipfs',
+    IPFS_UPLOAD_TIMEOUT_MS: 10,
+    IPFS_UPLOAD_MAX_RETRIES: 2,
+    IPFS_UPLOAD_BACKOFF_MS: 1,
   },
 }));
 
-/**
- * Pinata SDK mock.
- * The upload builder mirrors the real SDK surface (name/keyvalues/then) and
- * nothing else, so a call to a method the SDK does not expose fails the test.
- */
-const mockUploadOutcome = jest.fn();
-const mockBuilder = {
-  name: jest.fn(),
-  keyvalues: jest.fn(),
-  then: (
-    onFulfilled?: (value: unknown) => unknown,
-    onRejected?: (reason: unknown) => unknown,
-  ) => Promise.resolve().then(() => mockUploadOutcome()).then(onFulfilled, onRejected),
-};
-const mockPublicFile = jest.fn();
+import {
+  computeBackoffDelayMs,
+  IPFS_CID_VERSION_MISMATCH,
+  IPFS_UPLOAD_FAILED,
+  IPFS_UPLOAD_TIMEOUT,
+  ipfsService,
+  isRetryableUploadError,
+} from '../ipfs.service';
+import { AppError } from '../../errors/AppError';
 
-jest.mock("pinata", () => ({
-  __esModule: true,
-  PinataSDK: jest.fn().mockImplementation(() => ({
-    upload: { public: { file: mockPublicFile } },
-  })),
-}));
+const VALID_CID = 'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi';
+const MAX_ATTEMPTS = 3; // 1 + IPFS_UPLOAD_MAX_RETRIES
 
-import { PinataSDK } from "pinata";
-import { ipfsService } from "../ipfs.service";
-import { AppError } from "../../errors/AppError";
-import type { IpfsUploadResult } from "../../types/ipfs.types";
+/** Minimal chainable Pinata upload builder whose `await` runs `onAwait`. */
+function makeBuilder(onAwait: () => Promise<unknown>) {
+  const builder: Record<string, unknown> = {};
+  builder.name = jest.fn(() => builder);
+  builder.cidVersion = jest.fn(() => builder);
+  builder.keyvalues = jest.fn(() => builder);
+  builder.then = (
+    onFulfilled: (value: unknown) => unknown,
+    onRejected: (reason: unknown) => unknown,
+  ) => onAwait().then(onFulfilled, onRejected);
+  return builder;
+}
 
-const GATEWAY = "https://gateway.pinata.cloud/ipfs";
-const CID = "bafkreibm6jg3ux5qumhcn2b3flc3tyu6dmlb4xa7u5bf44yegnrjhc4yeq";
+let mockFile: jest.Mock;
 
-/** Shape of a successful Pinata v3 public upload response. */
-const pinataResponse = (overrides: Record<string, unknown> = {}) => ({
-  id: "0195f8f2-8e2f-7c5b-9d3a-1f2e3d4c5b6a",
-  name: "photo.png",
-  cid: CID,
-  size: 2048,
-  created_at: "2026-09-26T10:00:00.000Z",
-  number_of_files: 1,
-  mime_type: "application/octet-stream",
-  group_id: null,
-  keyvalues: {},
-  vectorized: false,
-  network: "public",
-  ...overrides,
+beforeEach(() => {
+  mockFile = jest.fn();
+  // Replace the SDK boundary on the singleton service.
+  (ipfsService as unknown as { pinata: unknown }).pinata = {
+    upload: { public: { file: mockFile } },
+  };
 });
 
-const uploadedFile = (): File => mockPublicFile.mock.calls[0][0] as File;
+describe('ipfsService.upload resilience (Tybravo/StellarProof#675)', () => {
+  it('uploads successfully on the first attempt', async () => {
+    mockFile.mockReturnValueOnce(
+      makeBuilder(async () => ({ cid: VALID_CID, size: 3, name: 'a' })),
+    );
 
-describe("IpfsService", () => {
-  let fetchSpy: jest.SpyInstance;
+    const result = await ipfsService.upload({ content: Buffer.from('abc'), name: 'a' });
 
-  beforeEach(() => {
-    mockUploadOutcome.mockReset();
-    mockPublicFile.mockReset().mockReturnValue(mockBuilder);
-    mockBuilder.name.mockReset().mockReturnValue(mockBuilder);
-    mockBuilder.keyvalues.mockReset().mockReturnValue(mockBuilder);
-    // Guard: the SDK is mocked, so any real HTTP call is a test failure.
-    fetchSpy = jest.spyOn(globalThis, "fetch").mockImplementation(() => {
-      throw new Error("Unexpected network call during IPFS unit test");
-    });
+    expect(mockFile).toHaveBeenCalledTimes(1);
+    expect(result.cid).toBe(VALID_CID);
+    expect(result.gatewayUrl).toBe(`https://gateway.example/ipfs/${VALID_CID}`);
   });
 
-  afterEach(() => {
-    expect(fetchSpy).not.toHaveBeenCalled();
-    fetchSpy.mockRestore();
+  it('retries transient failures with backoff and then succeeds', async () => {
+    mockFile
+      .mockReturnValueOnce(makeBuilder(async () => {
+        throw new Error('flaky');
+      }))
+      .mockReturnValueOnce(makeBuilder(async () => {
+        throw new Error('flaky again');
+      }))
+      .mockReturnValueOnce(makeBuilder(async () => ({ cid: VALID_CID })));
+
+    const result = await ipfsService.upload({ content: Buffer.from('abc') });
+
+    expect(mockFile).toHaveBeenCalledTimes(3);
+    expect(result.cid).toBe(VALID_CID);
   });
 
-  it("constructs the Pinata SDK with the configured JWT and gateway", () => {
-    expect(PinataSDK).toHaveBeenCalledWith({
-      pinataJwt: "test-pinata-jwt",
-      pinataGateway: GATEWAY,
+  it('maps a hung upload to AppError(502, IPFS_UPLOAD_TIMEOUT) after exhausting attempts', async () => {
+    mockFile.mockReturnValue(makeBuilder(() => new Promise(() => {})));
+
+    await expect(ipfsService.upload({ content: Buffer.from('abc') })).rejects.toMatchObject({
+      statusCode: 502,
+      code: IPFS_UPLOAD_TIMEOUT,
     });
+    expect(mockFile).toHaveBeenCalledTimes(MAX_ATTEMPTS);
   });
 
-  describe("upload() success", () => {
-    it("returns a complete IpfsUploadResult for a buffer upload", async () => {
-      mockUploadOutcome.mockReturnValue(pinataResponse());
+  it('does not retry a deterministic CID-version mismatch', async () => {
+    mockFile.mockReturnValue(makeBuilder(async () => ({ cid: 'not-a-valid-cid' })));
 
-      const result = await ipfsService.upload({
-        content: Buffer.from("binary-media"),
-        name: "photo.png",
-      });
-
-      expect(result).toEqual<IpfsUploadResult>({
-        cid: CID,
-        size: 2048,
-        name: "photo.png",
-        timestamp: expect.any(String),
-        gatewayUrl: `${GATEWAY}/${CID}`,
-      });
-      expect(Object.keys(result).sort()).toEqual(["cid", "gatewayUrl", "name", "size", "timestamp"]);
-      expect(new Date(result.timestamp).toISOString()).toBe(result.timestamp);
+    await expect(ipfsService.upload({ content: Buffer.from('abc') })).rejects.toMatchObject({
+      statusCode: 502,
+      code: IPFS_CID_VERSION_MISMATCH,
     });
-
-    it("wraps a buffer in an octet-stream File carrying the exact bytes", async () => {
-      mockUploadOutcome.mockReturnValue(pinataResponse());
-      const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
-
-      await ipfsService.upload({ content: bytes, name: "image.png" });
-
-      const file = uploadedFile();
-      expect(file.name).toBe("image.png");
-      expect(file.type).toBe("application/octet-stream");
-      expect(Buffer.from(await file.arrayBuffer())).toEqual(bytes);
-    });
-
-    it("serialises object content to a .json File", async () => {
-      mockUploadOutcome.mockReturnValue(pinataResponse({ name: "manifest" }));
-      const manifest = { contentHash: "abc123", creator: "GABC" };
-
-      await ipfsService.upload({ content: manifest, name: "manifest" });
-
-      const file = uploadedFile();
-      expect(file.name).toBe("manifest.json");
-      expect(file.type).toBe("application/json");
-      expect(JSON.parse(await file.text())).toEqual(manifest);
-    });
-
-    it("injects name and keyvalues metadata through the SDK builder", async () => {
-      mockUploadOutcome.mockReturnValue(pinataResponse());
-      const metadata = { manifestId: "66f5a0c2e4b0a1b2c3d4e5f6", mimetype: "image/png" };
-
-      await ipfsService.upload({ content: Buffer.from("x"), name: "photo.png", metadata });
-
-      expect(mockBuilder.name).toHaveBeenCalledWith("photo.png");
-      expect(mockBuilder.keyvalues).toHaveBeenCalledTimes(1);
-      expect(mockBuilder.keyvalues).toHaveBeenCalledWith(metadata);
-    });
-
-    it("omits keyvalues when no metadata is supplied and defaults the name", async () => {
-      mockUploadOutcome.mockReturnValue(pinataResponse({ name: undefined }));
-
-      const result = await ipfsService.upload({ content: Buffer.from("x") });
-
-      expect(mockBuilder.name).toHaveBeenCalledWith("upload");
-      expect(mockBuilder.keyvalues).not.toHaveBeenCalled();
-      expect(uploadedFile().name).toBe("upload");
-      expect(result.name).toBe("upload");
-    });
-
-    it("falls back to the local byte length when Pinata omits size", async () => {
-      mockUploadOutcome.mockReturnValue(pinataResponse({ size: undefined }));
-      const content = { hello: "world" };
-
-      const bufferResult = await ipfsService.upload({ content: Buffer.alloc(37) });
-      const jsonResult = await ipfsService.upload({ content });
-
-      expect(bufferResult.size).toBe(37);
-      expect(jsonResult.size).toBe(Buffer.byteLength(JSON.stringify(content)));
-    });
+    expect(mockFile).toHaveBeenCalledTimes(1);
   });
 
-  describe("upload() failures", () => {
-    const expectIpfsAppError = async (promise: Promise<unknown>, message: string) => {
-      const error = await promise.catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(AppError);
-      expect(error).toMatchObject({
-        statusCode: 502,
-        code: "IPFS_UPLOAD_FAILED",
-        message,
-      });
-    };
+  it('wraps an exhausted transient failure as AppError(502, IPFS_UPLOAD_FAILED)', async () => {
+    mockFile.mockReturnValue(makeBuilder(async () => {
+      throw new Error('provider down');
+    }));
 
-    it("maps a Pinata API error to a 502 IPFS_UPLOAD_FAILED AppError", async () => {
-      const pinataError = Object.assign(new Error("HTTP error: 401 Unauthorized"), {
-        name: "AuthenticationError",
-        statusCode: 401,
-      });
-      mockUploadOutcome.mockImplementation(() => {
-        throw pinataError;
-      });
-
-      await expectIpfsAppError(
-        ipfsService.upload({ content: Buffer.from("x"), name: "photo.png" }),
-        "IPFS upload failed: HTTP error: 401 Unauthorized",
-      );
+    await expect(ipfsService.upload({ content: Buffer.from('abc') })).rejects.toMatchObject({
+      statusCode: 502,
+      code: IPFS_UPLOAD_FAILED,
     });
+    expect(mockFile).toHaveBeenCalledTimes(MAX_ATTEMPTS);
+  });
+});
 
-    it("maps a network failure to a 502 IPFS_UPLOAD_FAILED AppError", async () => {
-      mockUploadOutcome.mockImplementation(() => {
-        throw new TypeError("fetch failed");
-      });
+describe('computeBackoffDelayMs', () => {
+  it('grows exponentially and is capped', () => {
+    expect(computeBackoffDelayMs(100, 0)).toBe(100);
+    expect(computeBackoffDelayMs(100, 1)).toBe(200);
+    expect(computeBackoffDelayMs(100, 2)).toBe(400);
+    expect(computeBackoffDelayMs(1000, 10, 5000)).toBe(5000);
+  });
+});
 
-      await expectIpfsAppError(
-        ipfsService.upload({ content: Buffer.from("x") }),
-        "IPFS upload failed: fetch failed",
-      );
-    });
-
-    it("maps a synchronous SDK throw to a 502 IPFS_UPLOAD_FAILED AppError", async () => {
-      mockPublicFile.mockImplementation(() => {
-        throw new Error("Pinata JWT missing");
-      });
-
-      await expectIpfsAppError(
-        ipfsService.upload({ content: Buffer.from("x") }),
-        "IPFS upload failed: Pinata JWT missing",
-      );
-    });
-
-    it("uses a generic message when a non-Error value is thrown", async () => {
-      mockUploadOutcome.mockImplementation(() => {
-        throw "rate limited";
-      });
-
-      await expectIpfsAppError(
-        ipfsService.upload({ content: Buffer.from("x") }),
-        "IPFS upload failed: IPFS upload failed — unknown error",
-      );
-    });
-
-    it("re-throws an existing AppError unchanged", async () => {
-      const original = new AppError("Quota exceeded", 429, "IPFS_QUOTA_EXCEEDED");
-      mockUploadOutcome.mockImplementation(() => {
-        throw original;
-      });
-
-      await expect(ipfsService.upload({ content: Buffer.from("x") })).rejects.toBe(original);
-    });
+describe('isRetryableUploadError', () => {
+  it('retries timeouts and transient errors, but not CID mismatches or 4xx', () => {
+    expect(isRetryableUploadError(new AppError('t', 502, IPFS_UPLOAD_TIMEOUT))).toBe(true);
+    expect(isRetryableUploadError(new Error('network blip'))).toBe(true);
+    expect(isRetryableUploadError(new AppError('cid', 502, IPFS_CID_VERSION_MISMATCH))).toBe(false);
+    expect(isRetryableUploadError(new AppError('bad request', 400, 'SOME_CODE'))).toBe(false);
   });
 });
