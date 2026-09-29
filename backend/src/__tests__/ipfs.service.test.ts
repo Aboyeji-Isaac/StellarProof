@@ -3,6 +3,9 @@ jest.mock("../config/env", () => ({
   env: {
     PINATA_JWT: "test-jwt",
     PINATA_GATEWAY_URL: "https://gateway.pinata.cloud/ipfs",
+    IPFS_UPLOAD_TIMEOUT_MS: 30_000,
+    IPFS_UPLOAD_MAX_RETRIES: 0,
+    IPFS_UPLOAD_BACKOFF_MS: 1,
   },
 }));
 
