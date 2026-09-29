@@ -25,6 +25,14 @@ export enum VerificationStatus {
   FAILED = "failed",
 }
 
+export enum VerificationWebhookEvent {
+  COMPLETED = "verification.completed",
+  FAILED = "verification.failed",
+  MINTED = "certificate.minted",
+}
+
+export type VerificationTimelineActor = "worker" | "oracle" | "user";
+
 // ---------------------------------------------------------------------------
 // Valid transition map
 // ---------------------------------------------------------------------------
@@ -71,6 +79,8 @@ export interface ITimelineEntry {
   stage: VerificationStatus;
   /** When the job entered this stage. */
   at: Date;
+  /** Component or user responsible for the transition. */
+  actor: VerificationTimelineActor;
   /** Stellar transaction hash, present only for on-chain stages (e.g. minting). */
   txHash?: string;
 }
@@ -132,6 +142,8 @@ export interface IVerificationJob {
 
   /** Optional developer-supplied callback URL for async status updates. */
   webhookUrl?: string;
+  /** Event types subscribed to by the job's webhook endpoint. */
+  webhookEvents?: VerificationWebhookEvent[];
 
   createdAt?: Date;
   updatedAt?: Date;
@@ -148,6 +160,7 @@ export interface CreateVerificationJobDTO {
   manifestHash?: string;
   requestId?: string;
   webhookUrl?: string;
+  webhookEvents?: VerificationWebhookEvent[];
 }
 
 /** Payload for PATCH /api/v1/verification/jobs/:id/status */
@@ -163,6 +176,7 @@ export interface UpdateVerificationStatusDTO {
   codeMeasurementHash?: string;
   /** Stellar transaction hash - supplied when entering `minting` or `completed`. */
   stellarTransactionHash?: string;
+  certificateId?: string;
 }
 /** Standard JSON envelope returned by every endpoint. */
 export interface ApiResponse<T = unknown> {

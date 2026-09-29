@@ -4,7 +4,8 @@ import { StatusCodes } from "http-status-codes";
 
 import { verificationController } from "../controllers/verification.controller";
 import { validateBody, validateParams } from "../middlewares/validate";
-import { VerificationStatus } from "../types/verification.types";
+import { protect } from "../middlewares/auth.middleware";
+import { VerificationStatus, VerificationWebhookEvent } from "../types/verification.types";
 
 const STELLAR_PUBLIC_KEY_REGEX = /^G[A-Z2-7]{55}$/;
 const SHA256_HEX_REGEX = /^[a-fA-F0-9]{64}$/;
@@ -14,6 +15,10 @@ const URL_REGEX = /^https?:\/\/.+/;
 const STATUS_VALUES = Object.values(VerificationStatus) as [
   VerificationStatus,
   ...VerificationStatus[]
+];
+const WEBHOOK_EVENT_VALUES = Object.values(VerificationWebhookEvent) as [
+  VerificationWebhookEvent,
+  ...VerificationWebhookEvent[]
 ];
 
 const createJobSchema = z.object({
@@ -27,6 +32,7 @@ const createJobSchema = z.object({
     .string()
     .regex(URL_REGEX, "webhookUrl must be a valid http/https URL")
     .optional(),
+  webhookEvents: z.array(z.enum(WEBHOOK_EVENT_VALUES)).optional(),
 });
 
 const jobIdParamsSchema = z.object({
@@ -145,8 +151,23 @@ router.get(
   verificationController.getJob.bind(verificationController)
 );
 
+router.get(
+  "/:id/timeline",
+  protect,
+  validateParams(jobIdParamsSchema),
+  verificationController.getTimeline.bind(verificationController)
+);
+
+router.post(
+  "/:id/retry",
+  protect,
+  validateParams(jobIdParamsSchema),
+  verificationController.retryJob.bind(verificationController)
+);
+
 router.patch(
   "/:id/status",
+  protect,
   validateParams(jobIdParamsSchema),
   validateBody(updateStatusSchema),
   verificationController.updateStatus.bind(verificationController)

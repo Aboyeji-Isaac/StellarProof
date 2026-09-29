@@ -13,12 +13,19 @@
  * - Timestamps are enabled via Mongoose options (adds `createdAt` / `updatedAt`).
  */
 import { Schema, model, Document } from "mongoose";
-import { VerificationStatus } from "../types/verification.types";
+import { VerificationStatus, VerificationWebhookEvent } from "../types/verification.types";
 import type { IVerificationJob, ITimelineEntry } from "../types/verification.types";
 
 export type VerificationJobDocument = IVerificationJob & Document;
 
 const ALL_STATUSES = Object.values(VerificationStatus);
+const ALL_WEBHOOK_EVENTS = Object.values(VerificationWebhookEvent);
+const ACTIVE_STATUSES = [
+  VerificationStatus.PENDING,
+  VerificationStatus.PROCESSING,
+  VerificationStatus.TEE_VERIFYING,
+  VerificationStatus.MINTING,
+];
 
 const TimelineEntrySchema = new Schema<ITimelineEntry>(
   {
@@ -39,6 +46,12 @@ const TimelineEntrySchema = new Schema<ITimelineEntry>(
       type: String,
       trim: true,
       default: undefined,
+    },
+    actor: {
+      type: String,
+      enum: ["worker", "oracle", "user"],
+      required: true,
+      default: "worker",
     },
   },
   { _id: false }
@@ -146,10 +159,24 @@ const VerificationJobSchema = new Schema<VerificationJobDocument>(
       trim: true,
       default: undefined,
     },
+    webhookEvents: {
+      type: [String],
+      enum: ALL_WEBHOOK_EVENTS,
+      default: ALL_WEBHOOK_EVENTS,
+    },
   },
   {
     timestamps: true,
     versionKey: false,
+  }
+);
+
+VerificationJobSchema.index(
+  { contentHash: 1 },
+  {
+    unique: true,
+    name: "unique_active_job_per_content_hash",
+    partialFilterExpression: { status: { $in: ACTIVE_STATUSES } },
   }
 );
 

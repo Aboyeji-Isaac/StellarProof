@@ -84,7 +84,7 @@ export class VerificationController {
         ownerPublicKey: user.stellarPublicKey || manifest.creator,
         contentHash: manifest.contentHash,
         status: VerificationStatus.PENDING,
-        timeline: [{ stage: VerificationStatus.PENDING, at: new Date() }],
+        timeline: [{ stage: VerificationStatus.PENDING, at: new Date(), actor: "user" }],
       });
 
       res.status(StatusCodes.CREATED).json({
@@ -144,6 +144,46 @@ export class VerificationController {
     }
   }
 
+  /** GET /api/v1/verification/jobs/:id/timeline */
+  async getTimeline(
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> {
+    try {
+      const requester = req.user;
+      const timeline = await verificationService.getJobTimeline(req.params.id, {
+        role: requester.role,
+        stellarPublicKey: requester.stellarPublicKey,
+      });
+      res.status(StatusCodes.OK).json({ success: true, data: timeline });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /** POST /api/v1/verification/jobs/:id/retry */
+  async retryJob(
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> {
+    try {
+      const requester = req.user;
+      const job = await verificationService.retryJob(req.params.id, {
+        role: requester.role,
+        stellarPublicKey: requester.stellarPublicKey,
+      });
+      res.status(StatusCodes.CREATED).json({
+        success: true,
+        data: job,
+        message: "Verification job retry submitted successfully",
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+
   /**
    * GET /api/v1/verification/jobs?ownerPublicKey=G...
    * Lists all VerificationJobs belonging to the given owner.
@@ -179,7 +219,8 @@ export class VerificationController {
       const dto = req.body as UpdateVerificationStatusDTO;
       const job = await verificationService.updateJobStatus(
         req.params.id,
-        dto
+        dto,
+        "user"
       );
       res.status(StatusCodes.OK).json({
         success: true,
