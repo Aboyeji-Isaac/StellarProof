@@ -1,4 +1,3 @@
-import { createHash } from "crypto";
 import { PinataSDK } from "pinata";
 import { StatusCodes } from "http-status-codes";
 import { env } from "../config/env";
@@ -54,37 +53,41 @@ class IpfsService {
 
   async upload(input: IpfsUploadInput): Promise<IpfsUploadResult> {
     const { content, name = "upload", metadata = {} } = input;
+    const file = this.toFile(content, name);
 
-    try {
-      let file: File;
+    return this.uploadWithRetry(file, name, metadata, content);
+  }
 
-      if (Buffer.isBuffer(content)) {
-        // Use Uint8Array to satisfy BlobPart requirement and avoid SharedArrayBuffer issues
-        file = new File([new Uint8Array(content)], name, { type: "application/octet-stream" });
-      } else {
-        const json = JSON.stringify(content);
-        file = new File([json], `${name}.json`, { type: "application/json" });
-      }
+  /**
+   * Upload the file, retrying transient failures up to
+   * `IPFS_UPLOAD_MAX_RETRIES` times with exponential backoff. Every attempt is
+   * bounded by `IPFS_UPLOAD_TIMEOUT_MS`.
+   */
+  private async uploadWithRetry(
+    file: File,
+    name: string,
+    metadata: Record<string, string>,
+    content: IpfsUploadInput["content"],
+  ): Promise<IpfsUploadResult> {
+    const maxAttempts = env.IPFS_UPLOAD_MAX_RETRIES + 1;
+    let lastError: unknown;
 
-      let builder = this.pinata.upload.public
-        .file(file)
-        .name(name)
-        .cidVersion(PINATA_CID_VERSION);
-
-      if (Object.keys(metadata).length > 0) {
-        builder = builder.keyvalues(metadata);
-      }
-
-      const response = await builder;
-      const cid = response.cid;
-
-      if (typeof cid !== "string" || !isCidV1(cid)) {
-        throw new AppError(
-          `IPFS upload returned a non-CIDv1 content identifier: ${String(cid)}`,
-          StatusCodes.BAD_GATEWAY,
-          "IPFS_CID_VERSION_MISMATCH"
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      try {
+        return await withUploadTimeout(
+          () => this.performUpload(file, name, metadata, content),
+          env.IPFS_UPLOAD_TIMEOUT_MS,
         );
+      } catch (err) {
+        lastError = err;
+
+        if (attempt === maxAttempts - 1 || !isRetryableUploadError(err)) {
+          break;
+        }
+
+        await delay(computeBackoffDelayMs(env.IPFS_UPLOAD_BACKOFF_MS, attempt));
       }
+    }
 
       const size: number = response.size ?? (Buffer.isBuffer(content) ? content.byteLength : Buffer.byteLength(JSON.stringify(content)));
       const gatewayUrl = this.getGatewayUrl(cid);
@@ -109,22 +112,31 @@ class IpfsService {
     } catch (err: unknown) {
       if (err instanceof AppError) throw err;
 
-      const message =
-        err instanceof Error
-          ? err.message
-          : "IPFS upload failed — unknown error";
+    const response = await builder;
+    const cid = response.cid;
 
+    if (typeof cid !== "string" || !isCidV1(cid)) {
       throw new AppError(
-        `IPFS upload failed: ${message}`,
+        `IPFS upload returned a non-CIDv1 content identifier: ${String(cid)}`,
         StatusCodes.BAD_GATEWAY,
-        "IPFS_UPLOAD_FAILED"
+        IPFS_CID_VERSION_MISMATCH,
       );
     }
-  }
 
-  /** Public gateway URL for a CID. */
-  getGatewayUrl(cid: string): string {
-    return `${env.PINATA_GATEWAY_URL.replace(/\/+$/, "")}/${cid}`;
+    const size: number =
+      response.size ??
+      (Buffer.isBuffer(content)
+        ? content.byteLength
+        : Buffer.byteLength(JSON.stringify(content)));
+
+    return {
+      cid,
+      cidVersion: 1,
+      size,
+      name: response.name ?? name,
+      timestamp: new Date().toISOString(),
+      gatewayUrl: `${env.PINATA_GATEWAY_URL}/${cid}`,
+    };
   }
 
   /**
@@ -207,55 +219,45 @@ class IpfsService {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), options.timeoutMs);
 
+    return new File([JSON.stringify(content)], `${name}.json`, { type: "application/json" });
+  }
+
+  /** Preserve typed AppErrors; wrap everything else as a 502 upload failure. */
+  private toUploadError(error: unknown): AppError {
+    if (error instanceof AppError) return error;
+
+    const message = error instanceof Error ? error.message : "IPFS upload failed — unknown error";
+    return new AppError(`IPFS upload failed: ${message}`, StatusCodes.BAD_GATEWAY, IPFS_UPLOAD_FAILED);
+  }
+  
+  async fetchManifestJson(cidOrUrl: string): Promise<Record<string, any>> {
+    const url = cidOrUrl.startsWith("http")
+      ? cidOrUrl
+      : `${env.PINATA_GATEWAY_URL}/${cidOrUrl}`;
+
     try {
-      const response = await fetch(this.getGatewayUrl(cid), {
-        method: "GET",
-        signal: controller.signal,
-        redirect: "follow",
-      });
+      const response = await fetch(url);
 
-      if (response.status === StatusCodes.NOT_FOUND || response.status === StatusCodes.GONE) {
-        await response.body?.cancel();
-        return { status: "not_found", httpStatus: response.status };
+      if (!response.ok) {
+        throw new AppError(
+          `IPFS fetch failed with status ${response.status}`,
+          StatusCodes.BAD_GATEWAY,
+          "IPFS_FETCH_FAILED"
+        );
       }
 
-      if (!response.ok || !response.body) {
-        await response.body?.cancel();
-        return { status: "unreachable", httpStatus: response.status };
-      }
+      return await response.json();
+    } catch (err: unknown) {
+      if (err instanceof AppError) throw err;
 
-      const lengthHeader = response.headers.get("content-length");
-      const declaredSize = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
+      const message =
+        err instanceof Error ? err.message : "IPFS fetch failed - unknown error";
 
-      if (declaredSize !== null && declaredSize > options.maxBytes) {
-        await response.body.cancel();
-        return { status: "too_large", declaredSize };
-      }
-
-      const hash = createHash("sha256");
-      const reader = response.body.getReader();
-      let received = 0;
-
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        received += value.byteLength;
-        if (received > options.maxBytes) {
-          await reader.cancel();
-          return { status: "too_large", declaredSize };
-        }
-        hash.update(value);
-      }
-
-      return { status: "ok", size: received, sha256: hash.digest("hex") };
-    } catch {
-      if (controller.signal.aborted) {
-        return { status: "timeout" };
-      }
-      return { status: "unreachable" };
-    } finally {
-      clearTimeout(timer);
+      throw new AppError(
+        `IPFS fetch failed: ${message}`,
+        StatusCodes.BAD_GATEWAY,
+        "IPFS_FETCH_FAILED"
+      );
     }
   }
 }

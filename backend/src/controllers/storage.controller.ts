@@ -51,6 +51,9 @@ export const uploadFile = async (req: Request, res: Response, next: NextFunction
       return next(error);
     }
 
+    // Reject hash mismatches (422) before anything is written to storage
+    const contentHash = contentHashService.verify(req.file.buffer, req.body.contentHash);
+
     // Call orchestrator
     const uploadResult = await storageOrchestratorService.orchestrate({
       storageProvider: storageProvider as any,
@@ -58,6 +61,7 @@ export const uploadFile = async (req: Request, res: Response, next: NextFunction
       mimetype: req.file.mimetype,
       originalname: req.file.originalname,
       userId,
+      contentHash,
     });
 
     // Return 201 with saved record
@@ -102,12 +106,15 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
       throw new AppError('Invalid userId', StatusCodes.BAD_REQUEST, 'INVALID_USER_ID');
     }
 
+    const contentHash = contentHashService.verify(req.file.buffer, req.body.contentHash);
+
     const uploadResult = await storageOrchestratorService.orchestrate({
       storageProvider: storageProvider as StorageProvider,
       buffer: req.file.buffer,
       mimetype: req.file.mimetype,
       originalname: req.file.originalname,
       userId,
+      contentHash,
     });
 
     const asset = await assetService.createFromUpload({
@@ -141,6 +148,46 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
         cidVersion: uploadResult.cid ? 1 : undefined,
         deduplicated: uploadResult.deduplicated ?? false,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Pre-upload hash-consistency check.
+ * Hashes the multipart buffer, compares it to the client-supplied contentHash
+ * and reports existing uploads of the same content. Never writes to storage.
+ */
+export const verifyContentHash = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    if (!req.file) {
+      throw new AppError(
+        "No file provided. Send multipart/form-data with a 'file' field.",
+        StatusCodes.BAD_REQUEST,
+        'NO_FILE_PROVIDED'
+      );
+    }
+
+    const userId = getAuthenticatedUserId(req);
+    if (!userId) {
+      throw new AppError(
+        'User authentication required or userId must be provided in request body.',
+        StatusCodes.UNAUTHORIZED,
+        'AUTH_REQUIRED'
+      );
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      throw new AppError('Invalid userId', StatusCodes.BAD_REQUEST, 'INVALID_USER_ID');
+    }
+
+    const result = await contentHashService.checkUpload(req.file.buffer, req.body.contentHash, userId);
+
+    res.status(StatusCodes.OK).json({
+      success: true,
+      message: 'contentHash matches the uploaded file',
+      data: result,
     });
   } catch (error) {
     next(error);
