@@ -1,5 +1,6 @@
 import mongoose, { Schema, Document } from 'mongoose';
-import { StorageProvider } from '../types/storage.types';
+import { StorageProvider, StorageRecordKind } from '../types/storage.types';
+import type { IpfsAvailability, IpfsPinStatus } from '../types/ipfs.types';
 
 /**
  * Storage Record Interface
@@ -21,9 +22,9 @@ export interface IStorageRecord extends Document {
   contentHash?: string;      // SHA-256 hex of the stored bytes (server-computed)
   originalFilename: string;  // Original uploaded filename
   uploadedAt: Date;
-  requestedProvider: StorageProvider; // Provider the client asked for
-  fallbackUsed: boolean;              // True when `provider` differs from `requestedProvider`
-  fallbackReason?: string;            // Why the requested provider failed
+  // IPFS only: pin propagation state and gateway reachability captured at upload time.
+  pinningStatus?: IpfsPinStatus;
+  availability?: IpfsAvailability;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -104,19 +105,20 @@ const StorageRecordSchema: Schema = new Schema(
       default: Date.now,
       required: true,
     },
-    requestedProvider: {
+    pinningStatus: {
       type: String,
-      enum: ['cloudinary', 'ipfs'],
-      required: [true, 'Requested storage provider is required'],
+      enum: ['pinning', 'pinned'],
+      // Only IPFS records report pin state; Cloudinary records leave it unset.
     },
-    fallbackUsed: {
-      type: Boolean,
-      default: false,
-      index: true,
-    },
-    fallbackReason: {
-      type: String,
-      maxlength: 1000,
+    availability: {
+      type: new Schema(
+        {
+          available: { type: Boolean },
+          httpStatus: { type: Number, default: null },
+          checkedAt: { type: String },
+        },
+        { _id: false }
+      ),
     },
   },
   { timestamps: true }

@@ -9,10 +9,11 @@ import logger from '../utils/logger';
 /** Provider-level upload outcome, before fallback bookkeeping is attached. */
 type ProviderUpload = Omit<UploadResult, 'requestedProvider' | 'fallbackUsed'>;
 
-interface ResolvedUpload {
-  uploadResult: ProviderUpload;
-  /** Set only when the requested provider failed and a fallback stored the file. */
-  fallbackReason?: string;
+/** Providers the orchestrator can route to. */
+const STORAGE_PROVIDERS: readonly StorageProvider[] = ['cloudinary', 'ipfs'];
+
+export function isValidCid(cid: string): boolean {
+  return CID_V0_PATTERN.test(cid) || CID_V1_BASE32_PATTERN.test(cid);
 }
 
 /** Mirrors the `maxlength` of StorageRecord.fallbackReason. */
@@ -126,9 +127,8 @@ class StorageOrchestratorService {
       contentHash: request.contentHash ?? computeSha256(request.buffer),
       originalFilename: request.originalname,
       uploadedAt: uploadResult.uploadedAt,
-      requestedProvider: request.storageProvider,
-      fallbackUsed: uploadResult.provider !== request.storageProvider,
-      fallbackReason,
+      pinningStatus: uploadResult.pinningStatus,
+      availability: uploadResult.availability,
     });
 
     if (Object.keys(backfill).length === 0) {
@@ -179,10 +179,24 @@ class StorageOrchestratorService {
         size: request.buffer.length,
       };
 
-      logger.warn('IPFS upload failed; falling back to Cloudinary', {
-        ...logContext,
-        reason: fallbackReason,
-      });
+        case 'ipfs': {
+          const ipfsUpload = await ipfsService.upload({
+            content: request.buffer,
+            name: request.originalname,
+            ...(request.metadata ? { metadata: request.metadata } : {}),
+          });
+          return {
+            provider: 'ipfs',
+            url: ipfsUpload.gatewayUrl,
+            gatewayUrl: ipfsUpload.gatewayUrl,
+            cid: ipfsUpload.cid,
+            size: ipfsUpload.size,
+            mimetype: request.mimetype,
+            uploadedAt: new Date(ipfsUpload.timestamp),
+            pinningStatus: ipfsUpload.pinningStatus,
+            availability: ipfsUpload.availability,
+          };
+        }
 
       try {
         const uploadResult = await this.uploadToCloudinary(request);
@@ -241,12 +255,23 @@ class StorageOrchestratorService {
     );
 
     return {
-      provider: 'ipfs',
-      url: ipfsUpload.gatewayUrl,
-      cid: ipfsUpload.cid,
-      size: ipfsUpload.size,
-      mimetype: request.mimetype,
-      uploadedAt: new Date(ipfsUpload.timestamp),
+      recordId: String(record._id),
+      provider: record.provider,
+      url: record.url,
+      cid: record.cid,
+      publicId: record.publicId,
+      ...(record.fallbackFrom ? { fallbackFrom: record.fallbackFrom } : {}),
+      kind: record.kind,
+      assetId: record.assetId?.toString(),
+      size: record.size,
+      mimetype: record.mimetype,
+      uploadedAt: record.uploadedAt,
+      deduplicated,
+      // IPFS records store the CID as their URL; expose it under its
+      // provider-named key so every upload response carries `gatewayUrl`.
+      ...(record.provider === 'ipfs' && record.cid ? { gatewayUrl: record.url } : {}),
+      ...(record.pinningStatus ? { pinningStatus: record.pinningStatus } : {}),
+      ...(record.availability ? { availability: record.availability } : {}),
     };
   }
 
