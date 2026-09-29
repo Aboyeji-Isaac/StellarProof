@@ -1,9 +1,12 @@
-import mongoose from "mongoose";
+﻿import mongoose from "mongoose";
 import { StatusCodes } from "http-status-codes";
 
 import { VerificationJobModel } from "../models/verificationJob.model";
 import { AppError } from "../errors/AppError";
 import { VerificationStateError } from "../errors/VerificationStateError";
+import Manifest from "../models/Manifest.model";
+import { ipfsService } from "./ipfs.service";
+import { generateDeterministicHash } from "../utils/crypto";
 import {
   VerificationStatus,
   VALID_TRANSITIONS,
@@ -35,12 +38,31 @@ function assertValidTransition(
   }
 }
 
+/**
+ * Appends an immutable timeline entry to a job document in memory.
+ * Callers are responsible for persisting the change via `job.save()`.
+ * `txHash` is only recorded when the transition actually carries one
+ * (e.g. entering `minting`); it is omitted otherwise.
+ */
+function recordTimelineEntry(
+  job: { timeline: Array<{ stage: VerificationStatus; at: Date; txHash?: string }> },
+  stage: VerificationStatus,
+  txHash?: string
+): void {
+  job.timeline.push({
+    stage,
+    at: new Date(),
+    ...(txHash ? { txHash } : {}),
+  });
+}
+
 async function createJob(dto: CreateVerificationJobDTO): Promise<IVerificationJob> {
   const job = await VerificationJobModel.create({
     ownerPublicKey: dto.ownerPublicKey,
     contentHash: dto.contentHash,
     status: VerificationStatus.PENDING,
     ...(dto.webhookUrl ? { webhookUrl: dto.webhookUrl } : {}),
+    timeline: [{ stage: VerificationStatus.PENDING, at: new Date() }],
   });
 
   return job.toObject<IVerificationJob>();
@@ -126,6 +148,8 @@ async function updateJobStatus(
     job.stellarTransactionHash = dto.stellarTransactionHash;
   if (dto.errorMessage !== undefined) job.errorMessage = dto.errorMessage;
 
+  recordTimelineEntry(job, nextStatus, dto.stellarTransactionHash);
+
   await job.save();
 
   return job.toObject<IVerificationJob>();
@@ -159,6 +183,8 @@ async function receiveOracleAttestation(
   job.teeSignature = dto.teeSignature;
   job.status = nextStatus;
 
+  recordTimelineEntry(job, nextStatus);
+
   await job.save();
 
   return job.toObject<IVerificationJob>();
@@ -170,4 +196,65 @@ export const verificationService = {
   getJobsByOwner,
   updateJobStatus,
   receiveOracleAttestation,
+  verifyManifestIntegrity,
 } as const;
+
+/**
+ * Fetches the manifest's stored JSON from IPFS, recomputes its deterministic
+ * hash, and compares it against the manifestHash recorded on the Manifest
+ * document (the on-chain/stored claim). On mismatch, the job is transitioned
+ * to `failed` with a descriptive error.
+ */
+async function verifyManifestIntegrity(jobId: string): Promise<IVerificationJob> {
+  assertValidObjectId(jobId);
+
+  const job = await VerificationJobModel.findById(jobId);
+  if (!job) {
+    throw new AppError(
+      `Verification job not found: '${jobId}'`,
+      StatusCodes.NOT_FOUND,
+      "JOB_NOT_FOUND"
+    );
+  }
+
+  if (!job.manifestId) {
+    throw new AppError(
+      `Verification job '${jobId}' has no associated manifest`,
+      StatusCodes.BAD_REQUEST,
+      "MANIFEST_ID_MISSING"
+    );
+  }
+
+  const manifest = await Manifest.findById(job.manifestId);
+  if (!manifest) {
+    throw new AppError(
+      `Manifest not found: '${job.manifestId}'`,
+      StatusCodes.NOT_FOUND,
+      "MANIFEST_NOT_FOUND"
+    );
+  }
+
+  if (!manifest.ipfsCid && !manifest.ipfsUrl) {
+    throw new AppError(
+      `Manifest '${job.manifestId}' has no IPFS reference to fetch`,
+      StatusCodes.BAD_REQUEST,
+      "MANIFEST_IPFS_REF_MISSING"
+    );
+  }
+
+  const fetchedManifestJson = await ipfsService.fetchManifestJson(
+    manifest.ipfsUrl ?? (manifest.ipfsCid as string)
+  );
+
+  const recomputedHash = generateDeterministicHash(fetchedManifestJson);
+  const onChainHash = manifest.manifestHash;
+
+  if (recomputedHash !== onChainHash) {
+    return updateJobStatus(jobId, {
+      status: VerificationStatus.FAILED,
+      errorMessage: `Manifest integrity check failed: recomputed hash '${recomputedHash}' does not match recorded hash '${onChainHash}'`,
+    });
+  }
+
+  return job.toObject<IVerificationJob>();
+}

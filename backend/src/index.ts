@@ -3,9 +3,8 @@ import { initCloudinary } from "./config/cloudinary";
 import { connectDatabase, disconnectDatabase } from "./config/database";
 import { env } from "./config/env";
 import { startCleanupJob } from "./jobs/cleanup.job";
-import { startStorageHealthJob } from "./jobs/storageHealth.job";
 import { startVerificationTimeoutJob } from "./jobs/verificationTimeout.job";
-
+import { startManifestRehashWorker } from "./jobs/verificationWorker";
 function hasCloudinaryConfig(): boolean {
   return Boolean(
     process.env.CLOUDINARY_CLOUD_NAME &&
@@ -18,8 +17,7 @@ async function main(): Promise<void> {
   await connectDatabase();
 
   startVerificationTimeoutJob();
-  startStorageHealthJob();
-
+  startManifestRehashWorker();
   if (hasCloudinaryConfig()) {
     initCloudinary();
     startCleanupJob();
