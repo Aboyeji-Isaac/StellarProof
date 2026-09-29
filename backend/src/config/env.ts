@@ -21,6 +21,17 @@ function optionalEnv(key: string, fallback: string): string {
   return process.env[key] ?? fallback;
 }
 
+function optionalPositiveIntEnv(key: string, fallback: number): number {
+  const raw = process.env[key];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    console.error(`[Config] ${key} must be a positive integer, got "${raw}"`);
+    process.exit(1);
+  }
+  return value;
+}
+
 export const env = {
   NODE_ENV: optionalEnv("NODE_ENV", "development"),
   PORT: parseInt(optionalEnv("PORT", "4000"), 10),
@@ -30,6 +41,22 @@ export const env = {
 
   /** Soroban/Stellar RPC endpoint, e.g. https://soroban-testnet.stellar.org */
   STELLAR_RPC_URL: requireEnv("STELLAR_RPC_URL"),
+
+  /** Optional backup RPC endpoints used when the primary fails. */
+  STELLAR_RPC_URL_2: optionalEnv("STELLAR_RPC_URL_2", ""),
+  STELLAR_RPC_URL_3: optionalEnv("STELLAR_RPC_URL_3", ""),
+
+  /** Primary + backup RPC endpoints in failover order. */
+  STELLAR_RPC_URLS: rpcUrlList(),
+
+  /** Consecutive network failures before an endpoint's circuit opens. */
+  STELLAR_RPC_FAILURE_THRESHOLD: parseInt(optionalEnv("STELLAR_RPC_FAILURE_THRESHOLD", "3"), 10),
+
+  /** How long an open circuit stays open before a half-open trial (ms). */
+  STELLAR_RPC_COOLDOWN_MS: parseInt(optionalEnv("STELLAR_RPC_COOLDOWN_MS", "30000"), 10),
+
+  /** Per-request timeout for RPC calls (ms). */
+  STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "10000"), 10),
 
   /**
    * Network passphrase used when building simulation transactions.
@@ -44,6 +71,9 @@ export const env = {
    * contract uses a different function name (e.g. "balance_of").
    */
   STELLAR_NFT_BALANCE_FN: optionalEnv("STELLAR_NFT_BALANCE_FN", "balance"),
+
+  /** Max time (ms) to wait for a single Soroban RPC call before failing with 504 */
+  STELLAR_RPC_TIMEOUT_MS: parseInt(optionalEnv("STELLAR_RPC_TIMEOUT_MS", "30000"), 10),
   /** Allowed CORS origin for the frontend. */
   CORS_ORIGIN: optionalEnv("CORS_ORIGIN", "http://localhost:3000"),
 

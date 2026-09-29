@@ -1,12 +1,16 @@
 import { StatusCodes } from "http-status-codes";
+import mongoose from "mongoose";
 import { z } from "zod";
 import { SPVModel } from "../models/spv.model";
-import ManifestModel, { IManifest } from "../models/Manifest.model";
+import ManifestModel, { IManifest, buildManifestHashPayload } from "../models/Manifest.model";
 import { AppError } from "../errors/AppError";
+import { ipfsService } from "./ipfs.service";
+import { generateDeterministicHash, sortObjectKeys } from "../utils/crypto";
 import type { IUser } from "../models/User.model";
 import type {
   IManifestEntry,
   ListManifestsQuery,
+  ManifestIpfsUploadResult,
   ManifestListResult,
 } from "../types/manifest.types";
 
@@ -143,6 +147,100 @@ class ManifestService {
     });
 
     return await newManifest.save();
+  }
+
+  /**
+   * Serializes the manifest deterministically (sorted keys, manifestHash from
+   * utils/crypto.ts), pins it to IPFS via Pinata and persists ipfsCid/ipfsUrl
+   * on the Manifest document so verification requests can reference the
+   * manifestCid.
+   *
+   * Pinning is idempotent: a manifest that already has an ipfsCid is returned
+   * unchanged instead of being pinned again.
+   */
+  public async uploadManifestToPinata(manifest: IManifest): Promise<ManifestIpfsUploadResult> {
+    const manifestId = String(manifest._id);
+
+    if (manifest.ipfsCid && manifest.ipfsUrl && manifest.ipfsUploadedAt && manifest.manifestHash) {
+      return this.toIpfsUploadResult(manifest, false);
+    }
+
+    const hashPayload = buildManifestHashPayload(manifest);
+    const manifestHash = generateDeterministicHash(hashPayload);
+
+    if (manifest.manifestHash && manifest.manifestHash !== manifestHash) {
+      throw new AppError(
+        "Stored manifestHash does not match the manifest content",
+        StatusCodes.CONFLICT,
+        "MANIFEST_HASH_MISMATCH"
+      );
+    }
+
+    // Sorted-key object: JSON.stringify preserves insertion order, so the
+    // pinned bytes are identical to canonicalStringify(document).
+    const document = sortObjectKeys({ ...hashPayload, manifestHash });
+
+    const upload = await ipfsService.upload({
+      content: document,
+      name: `manifest-${manifestId}`,
+      metadata: { manifestId, manifestHash },
+    });
+
+    manifest.manifestHash = manifestHash;
+    manifest.ipfsCid = upload.cid;
+    manifest.ipfsUrl = upload.gatewayUrl;
+    manifest.ipfsUploadedAt = new Date(upload.timestamp);
+    await manifest.save();
+
+    const persisted = await ManifestModel.findById(manifestId);
+    if (!persisted || !persisted.ipfsCid) {
+      throw new AppError(
+        "Failed to persist manifest IPFS reference",
+        StatusCodes.INTERNAL_SERVER_ERROR,
+        "MANIFEST_PERSIST_FAILED"
+      );
+    }
+
+    return this.toIpfsUploadResult(persisted, true);
+  }
+
+  /**
+   * Loads a manifest by id, enforces ownership when a requester is supplied,
+   * and pins it via uploadManifestToPinata.
+   */
+  public async publishManifestById(
+    manifestId: string,
+    requesterId?: string
+  ): Promise<ManifestIpfsUploadResult> {
+    if (!mongoose.Types.ObjectId.isValid(manifestId)) {
+      throw new AppError("Valid manifestId is required", StatusCodes.BAD_REQUEST, "INVALID_MANIFEST_ID");
+    }
+
+    const manifest = await ManifestModel.findById(manifestId);
+    if (!manifest) {
+      throw new AppError("Manifest not found", StatusCodes.NOT_FOUND, "MANIFEST_NOT_FOUND");
+    }
+
+    if (requesterId && manifest.creatorId?.toString() !== requesterId) {
+      throw new AppError(
+        "You do not have permission to publish this manifest",
+        StatusCodes.FORBIDDEN,
+        "MANIFEST_FORBIDDEN"
+      );
+    }
+
+    return this.uploadManifestToPinata(manifest);
+  }
+
+  private toIpfsUploadResult(manifest: IManifest, newlyPinned: boolean): ManifestIpfsUploadResult {
+    return {
+      manifestId: String(manifest._id),
+      manifestHash: manifest.manifestHash as string,
+      manifestCid: manifest.ipfsCid as string,
+      ipfsUrl: manifest.ipfsUrl as string,
+      ipfsUploadedAt: manifest.ipfsUploadedAt as Date,
+      newlyPinned,
+    };
   }
 }
 

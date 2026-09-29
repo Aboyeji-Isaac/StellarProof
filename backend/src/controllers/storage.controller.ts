@@ -4,7 +4,6 @@ import mongoose from 'mongoose';
 import { AppError } from '../errors/AppError';
 import Asset from '../models/Asset.model';
 import Manifest from '../models/Manifest.model';
-import { ipfsService } from '../services/ipfs.service';
 import { storageOrchestratorService } from '../services/storage.service';
 import { StorageError, type StorageProvider } from '../types/storage.types';
 
@@ -110,23 +109,26 @@ export const uploadMedia = async (req: Request, res: Response, next: NextFunctio
       userId,
     });
 
-    const asset = await Asset.create({
-      creatorId: new mongoose.Types.ObjectId(userId),
+    const asset = await assetService.createFromUpload({
+      creatorId: userId,
       fileName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      sizeBytes: uploadResult.size,
-      storageProvider: uploadResult.provider,
-      storageReferenceId: uploadResult.cid || uploadResult.url,
-      isEncrypted: false,
+      upload: uploadResult,
     });
+
+    if (uploadResult.recordId) {
+      await storageOrchestratorService.linkAsset(uploadResult.recordId, asset._id.toString());
+    }
 
     res.status(StatusCodes.CREATED).json({
       success: true,
       message: 'Media uploaded successfully',
       data: {
         assetId: asset._id,
+        storageProvider: asset.storageProvider,
+        storageReferenceId: asset.storageReferenceId,
         url: uploadResult.url,
         cid: uploadResult.cid,
+        deduplicated: uploadResult.deduplicated ?? false,
       },
     });
   } catch (error) {
@@ -138,7 +140,7 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
   try {
     const { manifestId } = req.body;
 
-    if (!manifestId || !mongoose.Types.ObjectId.isValid(manifestId)) {
+    if (typeof manifestId !== 'string') {
       throw new AppError('Valid manifestId is required', StatusCodes.BAD_REQUEST, 'INVALID_MANIFEST_ID');
     }
 
@@ -155,9 +157,19 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
     void ipfsUploadedAt;
 
     const manifestBuffer = Buffer.from(JSON.stringify(manifestPayload), 'utf8');
-    const uploadResult = await ipfsService.upload({
-      content: manifestBuffer,
-      name: `manifest-${manifest._id}.json`,
+    // Link the manifest record to the asset whose media bytes it describes
+    const assetId = await storageOrchestratorService.findAssetIdByContentHash(manifest.contentHash);
+
+    const uploadResult = await storageOrchestratorService.orchestrate({
+      storageProvider: 'ipfs',
+      buffer: manifestBuffer,
+      mimetype: 'application/json',
+      originalname: `manifest-${manifest._id}.json`,
+      userId: manifest.creatorId.toString(),
+      kind: 'manifest',
+      assetId,
+      // Manifests are content-addressed on IPFS; never fall back
+      allowFallback: false,
       metadata: {
         manifestId: manifest._id.toString(),
         manifestHash: manifest.manifestHash || '',
@@ -165,18 +177,33 @@ export const uploadManifest = async (req: Request, res: Response, next: NextFunc
     });
 
     manifest.ipfsCid = uploadResult.cid;
-    manifest.ipfsUrl = uploadResult.gatewayUrl;
-    manifest.ipfsUploadedAt = new Date(uploadResult.timestamp);
+    manifest.ipfsUrl = uploadResult.url;
+    manifest.ipfsUploadedAt = uploadResult.uploadedAt;
     await manifest.save();
 
     res.status(StatusCodes.OK).json({
       success: true,
       message: 'Manifest uploaded to IPFS successfully',
       data: {
-        manifestId: manifest._id,
-        cid: manifest.ipfsCid,
-        url: manifest.ipfsUrl,
+        manifestId: result.manifestId,
+        manifestHash: result.manifestHash,
+        manifestCid: result.manifestCid,
+        cid: result.manifestCid,
+        url: result.ipfsUrl,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const resolveCid = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const result = await storageOrchestratorService.resolveCid(req.params.cid);
+
+    res.status(StatusCodes.OK).json({
+      success: true,
+      data: result,
     });
   } catch (error) {
     next(error);

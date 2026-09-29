@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import multer from 'multer';
-import { uploadFile, uploadManifest, uploadMedia } from '../../controllers/storage.controller';
+import { resolveCid, uploadFile, uploadManifest, uploadMedia } from '../../controllers/storage.controller';
 
 /**
  * Storage Routes - v1
@@ -44,7 +44,32 @@ const upload = multer({
  * requestedProvider and fallbackUsed.
  */
 router.post('/upload', upload.single('file'), uploadFile);
+
+/**
+ * POST /api/v1/storage/media
+ * Upload a media file (defaults to IPFS) and create the linked Asset.
+ * IPFS pins are always requested as CIDv1; the returned IpfsHash is stored
+ * as the Asset's storageReferenceId and returned as `mediaCid`.
+ *
+ * Response:
+ *   - 201: { assetId, storageProvider, storageReferenceId, url, mediaCid, cidVersion }
+ *   - 400: Missing file or invalid userId
+ *   - 401: Authentication required
+ *   - 502: Provider error or non-CIDv1 response
+ */
 router.post('/media', upload.single('file'), uploadMedia);
 router.post('/manifest', uploadManifest);
+
+/**
+ * GET /api/v1/storage/resolve/:cid
+ * Check that a stored CID resolves on the IPFS gateway and that its bytes
+ * match the SHA-256 recorded at upload time.
+ *
+ * Response:
+ *   - 200: { available, size, hashMatches, expectedSize, gatewayStatus, cid, checkedAt }
+ *   - 400: Malformed CID
+ *   - 404: CID has no storage record
+ */
+router.get('/resolve/:cid', resolveCid);
 
 export default router;

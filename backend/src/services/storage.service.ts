@@ -1,4 +1,13 @@
-import { UploadRequest, UploadResult, StorageProvider, StorageError } from '../types/storage.types';
+import { createHash } from 'crypto';
+import { StatusCodes } from 'http-status-codes';
+import mongoose from 'mongoose';
+import {
+  UploadRequest,
+  UploadResult,
+  StorageProvider,
+  StorageError,
+  CidResolutionResult,
+} from '../types/storage.types';
 import { cloudinaryService } from './cloudinary.service';
 import { ipfsService } from './ipfs.service';
 import StorageRecord from '../models/StorageRecord.model';
@@ -23,6 +32,8 @@ const toErrorMessage = (error: unknown): string =>
 /**
  * Storage Orchestrator Service
  * Factory that routes upload requests to the appropriate provider (Cloudinary or IPFS)
+ * Consults the provider registry before each upload and fails over to the
+ * next ranked provider when the preferred one is unhealthy or errors.
  * Ensures all uploads are persisted to MongoDB before returning
  *
  * IPFS uploads are resilient: if pinning errors or exceeds IPFS_UPLOAD_TIMEOUT_MS,
@@ -30,18 +41,25 @@ const toErrorMessage = (error: unknown): string =>
  * records which provider actually holds the file.
  */
 class StorageOrchestratorService {
+  constructor(private readonly registry: StorageProviderRegistry) {}
+
   /**
    * Orchestrate the upload based on the requested storage provider
-   * Routes to the appropriate provider, persists result to DB, and returns saved record
+   * Routes to the appropriate provider, persists result to DB, and returns saved record.
+   *
+   * IPFS uploads are content-addressed and deduplicated: if the same bytes
+   * were already pinned, the existing StorageRecord is returned and the
+   * provider is not called again. If the provider returns a CID that already
+   * has a record (legacy record without contentHash, or a concurrent upload),
+   * that record is reused instead of creating a duplicate.
    */
   async orchestrate(request: UploadRequest): Promise<UploadResult> {
     // Validate provider
-    const validProviders: StorageProvider[] = ['cloudinary', 'ipfs'];
-    if (!validProviders.includes(request.storageProvider)) {
+    if (!STORAGE_PROVIDERS.includes(request.storageProvider)) {
       throw new StorageError(
         null,
         'orchestrate',
-        `Invalid storage provider: ${request.storageProvider}. Supported providers: ${validProviders.join(', ')}`,
+        `Invalid storage provider: ${request.storageProvider}. Supported providers: ${STORAGE_PROVIDERS.join(', ')}`,
         400,
       );
     }
@@ -65,8 +83,9 @@ class StorageOrchestratorService {
       fallbackReason,
     });
 
-    try {
-      const savedRecord = await storageRecord.save();
+    if (Object.keys(backfill).length === 0) {
+      return this.toUploadResult(record, true);
+    }
 
       // Return the saved record (not the provider result)
       // Ensures response data always comes from MongoDB
@@ -224,4 +243,4 @@ class StorageOrchestratorService {
   }
 }
 
-export const storageOrchestratorService = new StorageOrchestratorService();
+export const storageOrchestratorService = new StorageOrchestratorService(storageProviderRegistry);
