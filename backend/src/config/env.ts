@@ -101,9 +101,9 @@ export const env = {
   /** Pinata public gateway base URL */
   PINATA_GATEWAY_URL: optionalEnv("PINATA_GATEWAY_URL", "https://gateway.pinata.cloud/ipfs"),
 
-  /** Max time (ms) to wait for the IPFS gateway when resolving a CID */
-  IPFS_RESOLVE_TIMEOUT_MS: optionalPositiveIntEnv("IPFS_RESOLVE_TIMEOUT_MS", 15_000),
-
-  /** Max bytes downloaded from the IPFS gateway when resolving a CID (defaults to the 100 MB upload limit) */
-  IPFS_RESOLVE_MAX_BYTES: optionalPositiveIntEnv("IPFS_RESOLVE_MAX_BYTES", 100 * 1024 * 1024),
+  /**
+   * Maximum time (ms) the storage orchestrator waits for IPFS pinning before
+   * treating it as failed and falling back to Cloudinary.
+   */
+  IPFS_UPLOAD_TIMEOUT_MS: parseInt(optionalEnv("IPFS_UPLOAD_TIMEOUT_MS", "30000"), 10),
 } as const;
