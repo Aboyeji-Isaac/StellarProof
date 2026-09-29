@@ -1,18 +1,28 @@
-import { createHash } from "crypto";
-import { PinataSDK } from "pinata";
+import { PinataSDK, type FileListResponse } from "pinata";
 import { StatusCodes } from "http-status-codes";
 import { env } from "../config/env";
 import { AppError } from "../errors/AppError";
-import { isCidV1 } from "../utils/cid";
-import type { IpfsUploadInput, IpfsUploadResult } from "../types/ipfs.types";
-import type { GatewayFetchOptions, GatewayFetchResult } from "../types/storage.types";
+import type {
+  IpfsPin,
+  IpfsPinInput,
+  IpfsPinListQuery,
+  IpfsPinListResult,
+  IpfsPinResult,
+  IpfsUnpinResult,
+  IpfsUploadInput,
+  IpfsUploadResult,
+} from "../types/ipfs.types";
 
-/**
- * Every pin must be requested as CIDv1 so the returned IpfsHash is a
- * canonical base32 CID that is safe to reference from Soroban contracts.
- * Never rely on the provider default.
- */
-const PINATA_CID_VERSION: CidVersion = "v1";
+/** CIDv0 (base58btc, "Qm...") or CIDv1 (base32 lowercase, "b..."). */
+const CID_REGEX = /^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[a-z2-7]{58,})$/;
+
+export const PIN_LIST_DEFAULT_LIMIT = 50;
+export const PIN_LIST_MAX_LIMIT = 1000;
+
+export const isValidCid = (cid: string): boolean => CID_REGEX.test(cid);
+
+const toErrorMessage = (err: unknown, fallback: string): string =>
+  err instanceof Error ? err.message : fallback;
 
 class IpfsService {
   private readonly pinata: PinataSDK;
@@ -72,71 +82,132 @@ class IpfsService {
     }
   }
 
-  /** Public gateway URL for a CID. */
-  getGatewayUrl(cid: string): string {
-    return `${env.PINATA_GATEWAY_URL.replace(/\/+$/, "")}/${cid}`;
+  /**
+   * Pins content that already exists on the IPFS network by its CID.
+   * Pinata queues the pin and retrieves the content asynchronously.
+   */
+  async pinMedia(input: IpfsPinInput): Promise<IpfsPinResult> {
+    const { cid, name = cid, metadata = {} } = input;
+    this.assertValidCid(cid);
+
+    try {
+      let builder = this.pinata.upload.public.cid(cid).name(name);
+      if (Object.keys(metadata).length > 0) {
+        builder = builder.keyvalues(metadata);
+      }
+      const response = await builder;
+
+      return {
+        id: response.id,
+        cid: response.cid,
+        name: response.name,
+        status: response.status,
+        queuedAt: response.date_queued,
+      };
+    } catch (err: unknown) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(
+        `IPFS pin failed: ${toErrorMessage(err, "unknown error")}`,
+        StatusCodes.BAD_GATEWAY,
+        "IPFS_PIN_FAILED"
+      );
+    }
   }
 
   /**
-   * Stream a CID from the Pinata gateway and compute its SHA-256.
-   * The whole request (headers + body) is bounded by `timeoutMs`, and the
-   * download is aborted as soon as it exceeds `maxBytes`, so a slow gateway
-   * or an oversized object can never stall or exhaust the API process.
-   * Gateway-side failures are reported as a status rather than thrown.
+   * Releases every Pinata pin (file) holding the given CID.
+   * Idempotent: a CID with no pins resolves with `unpinned: false`.
    */
-  async fetchFromGateway(cid: string, options: GatewayFetchOptions): Promise<GatewayFetchResult> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  async unpinCid(cid: string): Promise<IpfsUnpinResult> {
+    this.assertValidCid(cid);
 
     try {
-      const response = await fetch(this.getGatewayUrl(cid), {
-        method: "GET",
-        signal: controller.signal,
-        redirect: "follow",
-      });
+      const files = await this.pinata.files.public.list().cid(cid).all();
+      const fileIds = files.map((file) => file.id);
 
-      if (response.status === StatusCodes.NOT_FOUND || response.status === StatusCodes.GONE) {
-        await response.body?.cancel();
-        return { status: "not_found", httpStatus: response.status };
+      if (fileIds.length === 0) {
+        return { cid, unpinned: false, fileIds: [] };
       }
 
-      if (!response.ok || !response.body) {
-        await response.body?.cancel();
-        return { status: "unreachable", httpStatus: response.status };
+      // The SDK reports per-file outcomes as free text (HTTP statusText or an
+      // error message), so confirm the release by re-listing the CID.
+      const results = await this.pinata.files.public.delete(fileIds);
+      const remaining = new Set(
+        (await this.pinata.files.public.list().cid(cid).all()).map((file) => file.id)
+      );
+
+      if (remaining.size > 0) {
+        const details = results
+          .filter((result) => remaining.has(result.id))
+          .map((result) => `${result.id} (${result.status})`)
+          .join(", ");
+        throw new AppError(
+          `IPFS unpin failed for ${remaining.size} of ${fileIds.length} pin(s) of ${cid}` +
+            (details ? `: ${details}` : ""),
+          StatusCodes.BAD_GATEWAY,
+          "IPFS_UNPIN_FAILED"
+        );
       }
 
-      const lengthHeader = response.headers.get("content-length");
-      const declaredSize = lengthHeader !== null && /^\d+$/.test(lengthHeader) ? Number(lengthHeader) : null;
+      return { cid, unpinned: true, fileIds };
+    } catch (err: unknown) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(
+        `IPFS unpin failed: ${toErrorMessage(err, "unknown error")}`,
+        StatusCodes.BAD_GATEWAY,
+        "IPFS_UNPIN_FAILED"
+      );
+    }
+  }
 
-      if (declaredSize !== null && declaredSize > options.maxBytes) {
-        await response.body.cancel();
-        return { status: "too_large", declaredSize };
-      }
+  /**
+   * Lists one page of pinned files in the Pinata account, newest first.
+   */
+  async listPins(query: IpfsPinListQuery = {}): Promise<IpfsPinListResult> {
+    const limit = query.limit ?? PIN_LIST_DEFAULT_LIMIT;
+    if (!Number.isInteger(limit) || limit < 1 || limit > PIN_LIST_MAX_LIMIT) {
+      throw new AppError(
+        `limit must be an integer between 1 and ${PIN_LIST_MAX_LIMIT}`,
+        StatusCodes.BAD_REQUEST,
+        "INVALID_PIN_LIST_LIMIT"
+      );
+    }
+    if (query.cid !== undefined) {
+      this.assertValidCid(query.cid);
+    }
 
-      const hash = createHash("sha256");
-      const reader = response.body.getReader();
-      let received = 0;
+    try {
+      let filter = this.pinata.files.public.list().order("DESC").limit(limit);
+      if (query.cid) filter = filter.cid(query.cid);
+      if (query.pageToken) filter = filter.pageToken(query.pageToken);
 
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const response: FileListResponse = await filter;
 
-        received += value.byteLength;
-        if (received > options.maxBytes) {
-          await reader.cancel();
-          return { status: "too_large", declaredSize };
-        }
-        hash.update(value);
-      }
+      return {
+        pins: response.files.map((file) => ({
+          id: file.id,
+          cid: file.cid,
+          name: file.name,
+          size: file.size,
+          mimeType: file.mime_type,
+          keyvalues: file.keyvalues ?? {},
+          createdAt: file.created_at,
+        })),
+        nextPageToken: response.next_page_token || null,
+      };
+    } catch (err: unknown) {
+      if (err instanceof AppError) throw err;
+      throw new AppError(
+        `IPFS pin listing failed: ${toErrorMessage(err, "unknown error")}`,
+        StatusCodes.BAD_GATEWAY,
+        "IPFS_LIST_PINS_FAILED"
+      );
+    }
+  }
 
-      return { status: "ok", size: received, sha256: hash.digest("hex") };
-    } catch {
-      if (controller.signal.aborted) {
-        return { status: "timeout" };
-      }
-      return { status: "unreachable" };
-    } finally {
-      clearTimeout(timer);
+  private assertValidCid(cid: string): void {
+    if (!isValidCid(cid)) {
+      throw new AppError(`Invalid IPFS CID: ${cid}`, StatusCodes.BAD_REQUEST, "INVALID_CID");
     }
   }
 }
