@@ -103,6 +103,7 @@ export interface IVerificationJob {
   stellarTransactionHash?: string;
   /** Transaction that emitted the accepted attestation event. */
   attestationTransactionHash?: string;
+  /** Certificate identifier returned by the Provenance contract. */
   certificateId?: string;
 
   // -- Failure data ---------------------------------------------------------
