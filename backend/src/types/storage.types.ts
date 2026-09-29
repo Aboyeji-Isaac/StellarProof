@@ -15,10 +15,7 @@ export interface UploadRequest {
   mimetype: string;
   originalname: string;
   userId: string;
-  kind?: StorageRecordKind;            // defaults to 'media'
-  assetId?: string;                    // Asset the stored object belongs to
-  metadata?: Record<string, string>;   // Provider metadata (IPFS pin key-values)
-  allowFallback?: boolean;             // IPFS -> Cloudinary fallback on failure (default true)
+  contentHash?: string;  // Verified SHA-256 hex; computed from the buffer when omitted
 }
 
 export interface UploadResult {
@@ -33,6 +30,7 @@ export interface UploadResult {
   assetId?: string;
   size: number;
   mimetype: string;
+  contentHash?: string;  // SHA-256 hex of the stored bytes
   uploadedAt: Date;
   /** True when an existing record was reused instead of pinning the bytes again */
   deduplicated?: boolean;
@@ -77,6 +75,29 @@ export interface CidResolutionResult {
   expectedSize: number;
   gatewayStatus: GatewayFetchStatus;
   checkedAt: Date;
+}
+
+/**
+ * Stored upload that already holds the same content hash
+ */
+export interface ExistingStorageRecord {
+  id: string;
+  provider: StorageProvider;
+  url: string;
+  cid?: string;
+  publicId?: string;
+  uploadedAt: Date;
+}
+
+/**
+ * Result of the pre-upload hash-consistency check
+ */
+export interface ContentHashCheckResult {
+  contentHash: string;
+  size: number;
+  matches: true;
+  alreadyStored: boolean;
+  existingRecords: ExistingStorageRecord[];
 }
 
 /**

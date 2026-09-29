@@ -1,13 +1,5 @@
-import { createHash } from 'crypto';
-import { StatusCodes } from 'http-status-codes';
-import mongoose from 'mongoose';
-import {
-  UploadRequest,
-  UploadResult,
-  StorageProvider,
-  StorageError,
-  CidResolutionResult,
-} from '../types/storage.types';
+import { computeSha256 } from '../utils/crypto';
+import { UploadRequest, UploadResult, StorageProvider, StorageError } from '../types/storage.types';
 import { cloudinaryService } from './cloudinary.service';
 import { ipfsService } from './ipfs.service';
 import StorageRecord from '../models/StorageRecord.model';
@@ -76,6 +68,7 @@ class StorageOrchestratorService {
       publicId: uploadResult.publicId,
       size: uploadResult.size,
       mimetype: uploadResult.mimetype,
+      contentHash: request.contentHash ?? computeSha256(request.buffer),
       originalFilename: request.originalname,
       uploadedAt: uploadResult.uploadedAt,
       requestedProvider: request.storageProvider,
@@ -98,6 +91,7 @@ class StorageOrchestratorService {
         publicId: savedRecord.publicId,
         size: savedRecord.size,
         mimetype: savedRecord.mimetype,
+        contentHash: savedRecord.contentHash,
         uploadedAt: savedRecord.uploadedAt,
       };
     } catch (dbError) {
