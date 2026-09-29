@@ -3,7 +3,6 @@ import { initCloudinary } from "./config/cloudinary";
 import { connectDatabase, disconnectDatabase } from "./config/database";
 import { env } from "./config/env";
 import { startCleanupJob } from "./jobs/cleanup.job";
-import { startStorageHealthJob } from "./jobs/storageHealth.job";
 import { startVerificationTimeoutJob } from "./jobs/verificationTimeout.job";
 import { statusStreamService } from "./services/statusStream.service";
 
@@ -19,8 +18,7 @@ async function main(): Promise<void> {
   await connectDatabase();
 
   startVerificationTimeoutJob();
-  startStorageHealthJob();
-
+  startManifestRehashWorker();
   if (hasCloudinaryConfig()) {
     initCloudinary();
     startCleanupJob();

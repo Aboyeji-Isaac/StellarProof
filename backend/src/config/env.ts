@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Centralised environment configuration.
  * All process.env reads happen here. Downstream modules import from `env`
  * and never access process.env directly.
@@ -106,4 +106,49 @@ export const env = {
 
   /** Max bytes downloaded from the IPFS gateway when resolving a CID (defaults to the 100 MB upload limit) */
   IPFS_RESOLVE_MAX_BYTES: optionalPositiveIntEnv("IPFS_RESOLVE_MAX_BYTES", 100 * 1024 * 1024),
-} as const;
+
+  // ── Oracle / worker fields ───────────────────────────────────────────────
+
+  /** Ed25519 secret seed (S...) for the oracle keypair that signs mint transactions. */
+  STELLAR_ORACLE_SECRET_KEY: optionalEnv("STELLAR_ORACLE_SECRET_KEY", ""),
+
+  /** C-address of the deployed provenance.mint contract. */
+  STELLAR_PROVENANCE_CONTRACT_ID: optionalEnv("STELLAR_PROVENANCE_CONTRACT_ID", ""),
+
+  /** SHA-256 hex digest of the trusted TEE code measurement. */
+  ORACLE_CODE_MEASUREMENT_HASH: optionalEnv("ORACLE_CODE_MEASUREMENT_HASH", ""),
+
+  /** How long (ms) to poll for on-chain transaction finality before giving up. */
+  STELLAR_TX_CONFIRMATION_TIMEOUT_MS: optionalPositiveIntEnv("STELLAR_TX_CONFIRMATION_TIMEOUT_MS", 120_000),
+
+  /** How long (ms) between getTransaction polls. */
+  STELLAR_TX_POLL_INTERVAL_MS: optionalPositiveIntEnv("STELLAR_TX_POLL_INTERVAL_MS", 2_000),
+
+  /** Max consecutive RPC errors before aborting confirmation with SorobanRpcError. */
+  STELLAR_TX_MAX_CONSECUTIVE_RPC_ERRORS: optionalPositiveIntEnv("STELLAR_TX_MAX_CONSECUTIVE_RPC_ERRORS", 3),
+
+  /** Timeout for SPV gateway fetches (ms). */
+  SPV_FETCH_TIMEOUT_MS: optionalPositiveIntEnv("SPV_FETCH_TIMEOUT_MS", 30_000),
+
+  /** Max bytes to download for media verification. */
+  SPV_MAX_MEDIA_BYTES: optionalPositiveIntEnv("SPV_MAX_MEDIA_BYTES", 10_000_000),
+
+  /** Max bytes to download for manifest verification. */
+  SPV_MAX_MANIFEST_BYTES: optionalPositiveIntEnv("SPV_MAX_MANIFEST_BYTES", 1_000_000),
+
+  /** Verification worker poll interval (ms). */
+  VERIFICATION_WORKER_POLL_INTERVAL_MS: optionalPositiveIntEnv("VERIFICATION_WORKER_POLL_INTERVAL_MS", 5_000),
+
+  /** Max events per worker cycle. */
+  VERIFICATION_WORKER_BATCH_SIZE: optionalPositiveIntEnv("VERIFICATION_WORKER_BATCH_SIZE", 10),
+
+  /** Max processing attempts before marking an event permanently failed. */
+  VERIFICATION_WORKER_MAX_ATTEMPTS: optionalPositiveIntEnv("VERIFICATION_WORKER_MAX_ATTEMPTS", 3),
+
+  /** Base delay (ms) for exponential backoff between retries. */
+  VERIFICATION_WORKER_RETRY_BASE_MS: optionalPositiveIntEnv("VERIFICATION_WORKER_RETRY_BASE_MS", 1_000),
+
+  /** Worker event lease duration (ms). Events not completed within this window can be reclaimed. */
+  VERIFICATION_WORKER_LEASE_MS: optionalPositiveIntEnv("VERIFICATION_WORKER_LEASE_MS", 360_000),
+
+
