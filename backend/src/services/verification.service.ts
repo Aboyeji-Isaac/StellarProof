@@ -16,6 +16,11 @@ import type {
   CreateVerificationJobDTO,
   UpdateVerificationStatusDTO,
   OracleCallbackDTO,
+  ListVerificationJobsQuery,
+  ListVerificationJobsResult,
+  JobStatusCounts,
+  JobStats,
+  JobTrendBucket,
 } from "../types/verification.types";
 import { statusStreamService } from "./statusStream.service";
 
@@ -95,6 +100,160 @@ async function getJobsByOwner(ownerPublicKey: string): Promise<IVerificationJob[
   return VerificationJobModel.find({ ownerPublicKey })
     .sort({ createdAt: -1 })
     .lean<IVerificationJob[]>();
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseRangeBound(value: string, endOfDay: boolean): Date {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return new Date(endOfDay ? `${value}T23:59:59.999Z` : `${value}T00:00:00.000Z`);
+  }
+  return new Date(value);
+}
+
+function emptyStatusCounts(): JobStatusCounts {
+  return {
+    pending: 0,
+    processing: 0,
+    tee_verifying: 0,
+    minting: 0,
+    completed: 0,
+    failed: 0,
+  };
+}
+
+function isStatusKey(value: string): value is keyof JobStatusCounts {
+  return value in emptyStatusCounts();
+}
+
+async function assertJobOwner(id: string, ownerPublicKey: string): Promise<IVerificationJob> {
+  assertValidObjectId(id);
+
+  const job = await VerificationJobModel.findById(id).lean<IVerificationJob>();
+  if (!job || job.ownerPublicKey !== ownerPublicKey) {
+    throw new AppError(
+      `Verification job not found: '${id}'`,
+      StatusCodes.NOT_FOUND,
+      "JOB_NOT_FOUND"
+    );
+  }
+
+  return job;
+}
+
+async function listJobs(query: ListVerificationJobsQuery): Promise<ListVerificationJobsResult> {
+  const filter: Record<string, unknown> = {
+    ownerPublicKey: query.ownerPublicKey,
+  };
+
+  if (query.status) {
+    filter.status = query.status;
+  }
+
+  if (query.dateFrom || query.dateTo) {
+    const createdAt: Record<string, Date> = {};
+    if (query.dateFrom) createdAt.$gte = parseRangeBound(query.dateFrom, false);
+    if (query.dateTo) createdAt.$lte = parseRangeBound(query.dateTo, true);
+    if (
+      createdAt.$gte &&
+      createdAt.$lte &&
+      createdAt.$gte.getTime() > createdAt.$lte.getTime()
+    ) {
+      throw new AppError(
+        "dateFrom must be earlier than or equal to dateTo",
+        StatusCodes.BAD_REQUEST,
+        "INVALID_DATE_RANGE"
+      );
+    }
+    filter.createdAt = createdAt;
+  }
+
+  if (query.contentHash) {
+    filter.contentHash = {
+      $regex: `^${escapeRegex(query.contentHash)}`,
+      $options: "i",
+    };
+  }
+
+  const [jobs, total] = await Promise.all([
+    VerificationJobModel.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(query.skip)
+      .limit(query.limit)
+      .lean<IVerificationJob[]>(),
+    VerificationJobModel.countDocuments(filter),
+  ]);
+
+  return {
+    jobs,
+    total,
+    limit: query.limit,
+    skip: query.skip,
+  };
+}
+
+async function getJobStats(ownerPublicKey: string): Promise<JobStats> {
+  const match = { ownerPublicKey };
+
+  const [grouped, trendRows] = await Promise.all([
+    VerificationJobModel.aggregate<{ _id: string; count: number }>([
+      { $match: match },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+    ]),
+    VerificationJobModel.aggregate<{
+      _id: { bucket: string; status: string };
+      count: number;
+    }>([
+      { $match: match },
+      {
+        $group: {
+          _id: {
+            bucket: {
+              $dateToString: { format: "%Y-%m-%d", date: "$createdAt", timezone: "UTC" },
+            },
+            status: "$status",
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { "_id.bucket": 1 } },
+    ]),
+  ]);
+
+  const counts = emptyStatusCounts();
+  for (const row of grouped) {
+    if (isStatusKey(row._id)) {
+      counts[row._id] = row.count;
+    }
+  }
+
+  const buckets = new Map<string, JobTrendBucket>();
+  for (const row of trendRows) {
+    const bucketKey = row._id.bucket;
+    const bucket = buckets.get(bucketKey) ?? {
+      bucket: bucketKey,
+      counts: emptyStatusCounts(),
+      total: 0,
+    };
+    if (isStatusKey(row._id.status)) {
+      bucket.counts[row._id.status] = row.count;
+      bucket.total += row.count;
+    }
+    buckets.set(bucketKey, bucket);
+  }
+
+  const total = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  const terminal = counts.completed + counts.failed;
+  const successRate = terminal === 0 ? 0 : Number((counts.completed / terminal).toFixed(4));
+
+  return {
+    counts,
+    total,
+    successRate,
+    trends: Array.from(buckets.values()),
+  };
 }
 
 async function updateJobStatus(
@@ -269,6 +428,9 @@ export const verificationService = {
   createJob,
   getJob,
   getJobsByOwner,
+  listJobs,
+  getJobStats,
+  assertJobOwner,
   updateJobStatus,
   receiveOracleAttestation,
   advanceFromAttestationEvent,
