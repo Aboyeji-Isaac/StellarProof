@@ -1,0 +1,11 @@
+--> Checkout the Included Work done 
+Manifest Schema Versioning — List View
+Provides a chronological list for reviewing schema changes across manifest versions.
+Manifest Schema Versioning — Grid View
+Presents schema-version records in a visual card-based arrangement.
+NFT Provenance Linker UI
+Defines the workflow for associating a StellarProof Certificate with a Stellar NFT.
+Verification Embed Widget Builder
+Provides controls for configuring the appearance of the verification badge and presenting the resulting HTML embed code.
+
+https://www.figma.com/design/2kP82C0Z8z0X3CncLQmfhB/Stellar-Project-Fig?node-id=3104-2&p=f&t=YxVm0kSu6XqIEPkD-0
