@@ -3,6 +3,9 @@ import { z } from "zod";
 import { StatusCodes } from "http-status-codes";
 
 import { verificationController } from "../controllers/verification.controller";
+import { protect } from "../middlewares/auth.middleware";
+import { oracleAuth } from "../middlewares/oracleAuth.middleware";
+import { requireJobOwnership, scopeJobsToOwner } from "../middlewares/ownership.middleware";
 import { validateBody, validateParams } from "../middlewares/validate";
 import { VerificationStatus } from "../types/verification.types";
 
@@ -33,10 +36,26 @@ const jobIdParamsSchema = z.object({
   id: z.string().regex(MONGO_OBJECT_ID_REGEX, "id must be a valid MongoDB ObjectId"),
 });
 
-const ownerPublicKeyQuerySchema = z.object({
+const listJobsQuerySchema = z.object({
   ownerPublicKey: z
     .string()
-    .regex(STELLAR_PUBLIC_KEY_REGEX, "Invalid Stellar public key (G...)"),
+    .regex(STELLAR_PUBLIC_KEY_REGEX, "Invalid Stellar public key (G...)")
+    .optional(),
+  status: z.enum(STATUS_VALUES).optional(),
+  dateFrom: z
+    .string()
+    .refine((value) => !Number.isNaN(Date.parse(value)), "dateFrom must be a valid date")
+    .optional(),
+  dateTo: z
+    .string()
+    .refine((value) => !Number.isNaN(Date.parse(value)), "dateTo must be a valid date")
+    .optional(),
+  contentHash: z
+    .string()
+    .regex(/^[a-fA-F0-9]{1,64}$/, "contentHash must be a hex prefix or SHA-256 digest")
+    .optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  skip: z.coerce.number().int().min(0).default(0),
 });
 
 const updateStatusSchema = z
@@ -112,8 +131,8 @@ const oracleCallbackSchema = z.object({
   teeSignature: z.string().min(1, "teeSignature is required"),
 });
 
-function validateOwnerQuery(req: Request, res: Response, next: NextFunction): void {
-  const result = ownerPublicKeyQuerySchema.safeParse(req.query);
+function validateListQuery(req: Request, res: Response, next: NextFunction): void {
+  const result = listJobsQuerySchema.safeParse(req.query);
   if (!result.success) {
     res.status(StatusCodes.BAD_REQUEST).json({
       success: false,
@@ -122,6 +141,7 @@ function validateOwnerQuery(req: Request, res: Response, next: NextFunction): vo
     });
     return;
   }
+  res.locals.listJobsQuery = result.data;
   next();
 }
 
@@ -134,28 +154,50 @@ router.post(
 );
 
 router.get(
+  "/stats",
+  protect,
+  scopeJobsToOwner,
+  verificationController.getJobStats.bind(verificationController)
+);
+
+router.get(
   "/",
-  validateOwnerQuery,
+  protect,
+  validateListQuery,
+  scopeJobsToOwner,
   verificationController.listJobsByOwner.bind(verificationController)
 );
 
 router.get(
   "/:id",
+  protect,
   validateParams(jobIdParamsSchema),
+  requireJobOwnership,
   verificationController.getJob.bind(verificationController)
 );
 
 router.patch(
   "/:id/status",
+  protect,
   validateParams(jobIdParamsSchema),
+  requireJobOwnership,
   validateBody(updateStatusSchema),
   verificationController.updateStatus.bind(verificationController)
 );
 
 router.post(
   "/oracle/callback",
+  oracleAuth,
   validateBody(oracleCallbackSchema),
   verificationController.oracleCallback.bind(verificationController)
+);
+
+router.get(
+  "/:id/stream",
+  protect,
+  validateParams(jobIdParamsSchema),
+  requireJobOwnership,
+  verificationController.subscribe.bind(verificationController)
 );
 
 export default router;

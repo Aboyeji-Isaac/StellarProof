@@ -4,10 +4,15 @@
  * The attestation hash is a deterministic SHA-256 over the verified facts, so a
  * retried request yields the same hash. The signature is the oracle
  * keypair's Ed25519 signature over the raw 32-byte hash.
+ *
+ * The code measurement hash is retrieved from the TEEConfig service to ensure
+ * consistency with the trusted TEE binary configuration stored in the database.
  */
 import { Keypair } from "@stellar/stellar-sdk";
 import { generateDeterministicHash } from "../utils/crypto";
 import { assertHex32 } from "../utils/xdr";
+import { teeConfigService } from "./teeConfig.service";
+import { AppError } from "../errors/AppError";
 
 export const ATTESTATION_VERSION = 1;
 
@@ -18,6 +23,7 @@ export interface AttestationInput {
   manifestCid: string;
   contentHash: string;
   manifestHash: string;
+  environment?: 'testnet' | 'mainnet' | 'development';
 }
 
 export interface Attestation {
@@ -50,6 +56,18 @@ export class AttestationService {
     const signature = keypair.sign(Buffer.from(attestationHash, "hex")).toString("hex");
 
     return { attestationHash, signature, codeMeasurementHash: measurement };
+  }
+
+  /**
+   * Legacy method: Create an attestation with a provided code measurement hash (deprecated)
+   * Use createAttestationWithTEEConfig() for new code to ensure database-backed hashes
+   */
+  createAttestation(
+    input: AttestationInput,
+    keypair: Keypair,
+    codeMeasurementHash: string
+  ): Attestation {
+    return this.createAttestationWithHash(input, keypair, codeMeasurementHash);
   }
 }
 
