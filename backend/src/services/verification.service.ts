@@ -18,6 +18,11 @@ import type {
   CreateVerificationJobDTO,
   UpdateVerificationStatusDTO,
   OracleCallbackDTO,
+  ListVerificationJobsQuery,
+  ListVerificationJobsResult,
+  JobStatusCounts,
+  JobStats,
+  JobTrendBucket,
 } from "../types/verification.types";
 import { VerificationRequestEventStatus } from "../types/verificationRequestEvent.types";
 import type { IVerificationRequestEvent } from "../types/verificationRequestEvent.types";
@@ -412,6 +417,9 @@ export const verificationService = {
   createJob,
   getJob,
   getJobsByOwner,
+  listJobs,
+  getJobStats,
+  assertJobOwner,
   updateJobStatus,
   receiveOracleAttestation,
   advanceFromAttestationEvent,

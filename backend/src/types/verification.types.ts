@@ -187,6 +187,49 @@ export interface ApiResponse<T = unknown> {
   message?: string;
 }
 
+/** Query for GET /api/v1/verification/jobs */
+export interface ListVerificationJobsQuery {
+  ownerPublicKey: string;
+  status?: VerificationStatus;
+  dateFrom?: string;
+  dateTo?: string;
+  contentHash?: string;
+  limit: number;
+  skip: number;
+}
+
+export interface ListVerificationJobsResult {
+  jobs: IVerificationJob[];
+  total: number;
+  limit: number;
+  skip: number;
+}
+
+export interface JobStatusCounts {
+  pending: number;
+  processing: number;
+  tee_verifying: number;
+  minting: number;
+  completed: number;
+  failed: number;
+}
+
+export interface JobTrendBucket {
+  /** UTC day, YYYY-MM-DD. */
+  bucket: string;
+  counts: JobStatusCounts;
+  total: number;
+}
+
+/** Payload for GET /api/v1/verification/jobs/stats */
+export interface JobStats {
+  counts: JobStatusCounts;
+  total: number;
+  /** completed / (completed + failed). 0 when no job has reached a terminal state. */
+  successRate: number;
+  trends: JobTrendBucket[];
+}
+
 /** Payload for POST /api/v1/verification/jobs/oracle/callback */
 export interface OracleCallbackDTO {
   jobId: string; // MongoDB ObjectId of the VerificationJob

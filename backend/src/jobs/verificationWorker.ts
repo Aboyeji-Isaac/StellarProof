@@ -111,7 +111,7 @@ export function startManifestRehashWorker(): void {
         throw new AppError(
           `Exceeded ${this.deps.config.maxAttempts} processing attempts`,
           500,
-          "MAX_ATTEMPTS_EXCEEDED"
+          "MAX_ATTEMPS_EXCEEDED"
         );
       }
 
@@ -150,12 +150,7 @@ export function startManifestRehashWorker(): void {
       });
 
       if (!job) {
-        job = await jobs.createJob({
-          ownerPublicKey: event.requester,
-          contentHash: result.contentHash,
-          manifestHash: result.manifestHash,
-          requestId: event.eventId,
-        });
+        job = await jobs.createJob({ wnerPublicKey: event.requester, contentHash: result.contentHash });
         await events.attachJob(event._id, this.workerId, String(job._id));
       }
       const id = String(job._id);
@@ -238,180 +233,4 @@ export function startManifestRehashWorker(): void {
 
     await jobs.updateJobStatus(id, { status: VerificationStatus.COMPLETED });
     await events.markCompleted(event._id, this.workerId, {
-      transactionHash: confirmed.txHash,
-      ...(certificateId !== undefined ? { certificateId } : {}),
-    });
-    this.deps.logger.info("Verification worker: certificate minted", {
-      workerId: this.workerId,
-      eventId: event.eventId,
-      jobId: id,
-      txHash: confirmed.txHash,
-      ledger: confirmed.ledger,
-      certificateId,
-    });
-    return "completed";
-  }
-
-  /**
-   * Submits the mint transaction for a job in `tee_verifying` and returns
-   * its hash once the RPC accepts it. If a previous attempt already submitted
-   * a transaction, that transaction's outcome is resolved first so a
-   * certificate is never minted twice.
-   */
-  private async submitAttestation(
-    event: IVerificationRequestEvent,
-    job: IVerificationJob,
-    manifestHash: string | undefined
-  ): Promise<string> {
-    const { events, soroban, oracle } = this.deps;
-
-    if (event.transactionHash) {
-      try {
-        await soroban.getTransactionWithConfirmation(event.transactionHash);
-        return event.transactionHash;
-      } catch (err) {
-        if (!transactionDidNotLand(err)) throw err;
-        this.deps.logger.warn("Verification worker: previous mint transaction did not land, rebuilding", {
-          workerId: this.workerId,
-          eventId: event.eventId,
-          txHash: event.transactionHash,
-          error: describeError(err),
-        });
-        await events.recordTransaction(event._id, this.workerId, null);
-      }
-    }
-
-    if (!manifestHash || !job.teeAttestationHash) {
-      throw new AppError(
-        "Cannot build mint transaction: manifest hash or attestation hash missing",
-        409,
-        "MISSING_ATTESTATION_DATA"
-      );
-    }
-
-    const signed = await soroban.buildMintTransaction(oracle.keypair, oracle.provenanceContractId, {
-      to: event.requester,
-      mediaCid: event.mediaCid,
-      manifestHash,
-      attestationHash: job.teeAttestationHash,
-    });
-
-    // Persist the hash before sending so a crash mid-submit can be resolved.
-    await events.recordTransaction(event._id, this.workerId, signed.hash);
-    try {
-      await soroban.submitTransaction(signed);
-    } catch (err) {
-      if (err instanceof TransactionFailedError || err instanceof TransactionSubmissionError) {
-        // Rejected before reaching a ledger: this hash can never land.
-        await events.recordTransaction(event._id, this.workerId, null);
-      }
-      throw err;
-    }
-
-    this.deps.logger.info("Verification worker: mint transaction submitted", {
-      workerId: this.workerId,
-      eventId: event.eventId,
-      jobId: String(job._id),
-      txHash: signed.hash,
-    });
-    return signed.hash;
-  }
-
-  private async settleFromTerminalJob(
-    event: IVerificationRequestEvent,
-    job: IVerificationJob
-  ): Promise<"completed" | "rejected"> {
-    if (job.status === VerificationStatus.COMPLETED && job.stellarTransactionHash) {
-      await this.deps.events.markCompleted(event._id, this.workerId, {
-        transactionHash: job.stellarTransactionHash,
-      });
-      return "completed";
-    }
-    await this.deps.events.markFailed(
-      event._id,
-      this.workerId,
-      job.errorMessage ?? `Verification job ended in '${job.status}'`
-    );
-    return "rejected";
-  }
-
-  private async handleFailure(
-    event: IVerificationRequestEvent,
-    jobId: string | undefined,
-    err: unknown
-  ): Promise<void> {
-    const message = describeError(err);
-    const ctx = {
-      workerId: this.workerId,
-      eventId: event.eventId,
-      jobId,
-      attempt: event.attempts,
-      error: message,
-      ...(err instanceof AppError && err.code ? { code: err.code } : {}),
-      ...(err instanceof TransactionFailedError ? { diagnostics: err.diagnostics } : {}),
-    };
-
-    if (err instanceof LeaseLostError) {
-      this.deps.logger.warn("Verification worker: lease lost, abandoning event", ctx);
-      return;
-    }
-
-    try {
-      if (isRetryableError(err) && event.attempts < this.deps.config.maxAttempts) {
-        const delay = Math.min(
-          this.deps.config.retryBaseMs * 2 ** (event.attempts - 1),
-          MAX_RETRY_DELAY_MS
-        );
-        const nextAttemptAt = new Date(this.now().getTime() + delay);
-        await this.deps.events.scheduleRetry(event._id, this.workerId, nextAttemptAt, message);
-        this.deps.logger.warn("Verification worker: retry scheduled", {
-          ...ctx,
-          nextAttemptAt: nextAttemptAt.toISOString(),
-        });
-        return;
-      }
-
-      await this.failJob(jobId, message);
-      await this.deps.events.markFailed(event._id, this.workerId, message);
-      this.deps.logger.error("Verification worker: event failed", ctx);
-    } catch (recordErr) {
-      // The event stays leased; it is reclaimed once the lease expires.
-      this.deps.logger.error("Verification worker: could not record failure", {
-        ...ctx,
-        recordError: describeError(recordErr),
-      });
-    }
-  }
-
-  private async failJob(jobId: string | undefined, message: string): Promise<void> {
-    if (!jobId) return;
-    const job = await this.deps.jobs.getJob(jobId);
-    if (isTerminal(job.status)) return;
-    await this.deps.jobs.updateJobStatus(jobId, {
-      status: VerificationStatus.FAILED,
-      errorMessage: message,
-    });
-  }
-}
-
-/** Builds a worker wired to the production services and configuration. */
-export function createVerificationWorker(): VerificationWorker {
-  const oracle = loadOracleConfig();
-  const queryClient = new SorobanContractQueryClient(oracle.keypair.publicKey());
-  const authorization = new RegistryAuthorizationService(
-    new RegistryContract(env.STELLAR_REGISTRY_CONTRACT_ID, queryClient),
-    new OracleContract(env.STELLAR_ORACLE_CONTRACT_ID, queryClient)
-  );
-
-  return new VerificationWorker({
-    events: verificationRequestEventService,
-    jobs: verificationService,
-    verifier: spvVerifierService,
-    attestations: attestationService,
-    authorization,
-    soroban: sorobanService,
-    oracle,
-    config: loadVerificationWorkerConfig(),
-    logger,
-  });
-}
+      transactionHash: confirmed.txH
