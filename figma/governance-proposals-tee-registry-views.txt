@@ -1,13 +1,11 @@
-Design Notes
-
-The designs were prepared to provide a consistent Light Mode experience across the governance and registry areas, with attention to:
-
-Clear visual hierarchy
-Consistent spacing and typography
-Readable status and health indicators
-Reusable design components
-Structured frames and layers
-Consistent table, list, and card patterns
-Responsive layout considerations
+//Included Figma Screens
+Governance Proposals — Table View
+Structured proposal rows with relevant governance information and actions.
+Governance Proposals — Grid View
+Card-based presentation of active proposals for a more visual browsing experience.
+Governance Proposals — List View
+Compact proposal listing optimized for scanning and navigation.
+TEE Registry Dashboard — Table View
+Tabular presentation of trusted Oracle Workers, registry information, and health indicators.
 
 https://www.figma.com/design/2kP82C0Z8z0X3CncLQmfhB/Stellar-Project-Fig?node-id=3104-2&p=f&t=YxVm0kSu6XqIEPkD-0
