@@ -38,8 +38,8 @@ describe("EventIngestionService", () => {
       getEvents: jest.fn(async () => ({ latestLedger: 205, events, cursor: "page-end" })),
     };
     const jobs = {
-      advanceFromAttestationEvent: jest.fn(async () => ({ _id: "job-1" } as never)),
-      completeFromMintEvent: jest.fn(async () => ({ _id: "job-1" } as never)),
+      advanceFromAttestationEvent: jest.fn(async () => ({ _id: "job-1" })),
+      completeFromMintEvent: jest.fn(async () => ({ _id: "job-1" })),
     };
     const cursors = {
       get: jest.fn(async (): Promise<{ cursor: string; latestLedger: number } | null> => null),
@@ -85,7 +85,7 @@ describe("EventIngestionService", () => {
     const registryContractId = contractId();
     const service = new EventIngestionService(
       rpcClient,
-      jobs,
+      jobs as never,
       cursors,
       {
         oracleContractId,
