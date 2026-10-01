@@ -19,6 +19,10 @@ const TOPIC_ATTESTATION = xdr.ScVal.scvSymbol("Attestation").toXDR("base64");
 const TOPIC_ATTESTED = xdr.ScVal.scvSymbol("Attested").toXDR("base64");
 const TOPIC_CERTIFICATE_MINTED = xdr.ScVal.scvSymbol("CertificateMinted").toXDR("base64");
 const TOPIC_REGISTRY = xdr.ScVal.scvSymbol("registry").toXDR("base64");
+const TOPIC_TEE_HASH_ADDED = xdr.ScVal.scvSymbol("TeeHashAdded").toXDR("base64");
+const TOPIC_TEE_HASH_REMOVED = xdr.ScVal.scvSymbol("TeeHashRemoved").toXDR("base64");
+const TOPIC_PROVIDER_ADDED = xdr.ScVal.scvSymbol("ProviderAdded").toXDR("base64");
+const TOPIC_PROVIDER_REMOVED = xdr.ScVal.scvSymbol("ProviderRemoved").toXDR("base64");
 
 let defaultSubscriberRegistered = false;
 
@@ -155,7 +159,14 @@ export class EventIngestionService {
           type: "contract",
           contractIds: [this.config.registryContractId],
           // Registry events are published as ("registry", EventName, ...).
-          topics: [[TOPIC_REGISTRY, "*"]],
+          // Keep the filter exact so every fetched event is one this decoder
+          // understands and can advance past durably.
+          topics: [
+            [TOPIC_REGISTRY, TOPIC_TEE_HASH_ADDED],
+            [TOPIC_REGISTRY, TOPIC_TEE_HASH_REMOVED],
+            [TOPIC_REGISTRY, TOPIC_PROVIDER_ADDED],
+            [TOPIC_REGISTRY, TOPIC_PROVIDER_REMOVED],
+          ],
         },
       ],
       limit: this.config.limit,
