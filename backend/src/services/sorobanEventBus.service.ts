@@ -1,5 +1,14 @@
 export type IngestedSorobanEvent =
   | {
+      kind: "verificationRequest";
+      eventId: string;
+      ledger: number;
+      transactionHash: string;
+      requestId?: string;
+      contentHash?: string;
+      state?: string;
+    }
+  | {
       kind: "attestation";
       eventId: string;
       ledger: number;
