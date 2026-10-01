@@ -3,8 +3,16 @@ import { StatusCodes } from "http-status-codes";
 import Certificate, { type ICertificate } from "../models/Certificate.model";
 import { AppError } from "../errors/AppError";
 import type {
+  ProvenanceContract,
+  OnChainCertificate,
+} from "./contracts/ProvenanceContract";
+import type {
   ListCertificatesQuery,
   CertificateListResult,
+  CertificateVerificationData,
+  CertificateVerificationDetails,
+  CertificateVerificationResult,
+  CertificateVerificationChecks,
 } from "../types/certificate.types";
 
 /** Escape user input so it can be safely embedded in a MongoDB `$regex`. */
@@ -12,7 +20,34 @@ function escapeRegex(input: string): string {
   return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/** Certificate cache document with the relations required for verification. */
+interface PopulatedVerificationCertificate {
+  certificateId: string;
+  contractAddress: string;
+  stellarNetwork: 'testnet' | 'mainnet';
+  mintedAt: Date;
+  assetId?: { storageReferenceId?: string } | null;
+  manifestId?: { manifestHash?: string; creator?: string } | null;
+  creatorId?: { stellarPublicKey?: string } | null;
+  verificationJobId?: {
+    ownerPublicKey?: string;
+    teeAttestationHash?: string;
+  } | null;
+}
+
 export class CertificateService {
+  constructor(
+    /**
+     * Lazily resolves the on-chain provenance reader. Kept as a factory so
+     * importing this service never requires Stellar credentials and unit
+     * tests can inject a fake reader.
+     */
+    private readonly provenanceFactory: () => Pick<
+      ProvenanceContract,
+      "getCertificate"
+    > = createProvenanceReader
+  ) {}
+
   async listCertificates(query: ListCertificatesQuery): Promise<CertificateListResult> {
     const { creatorId, search, limit, skip } = query;
 
@@ -88,6 +123,185 @@ export class CertificateService {
       .populate("assetId")
       .exec();
   }
+
+  /**
+   * Cross-checks the off-chain certificate cache against the ledger-stored
+   * provenance record (`provenance.get_certificate`).
+   *
+   * @throws {AppError} 400 when `certificateId` is missing.
+   * @throws {AppError} 404 when no matching certificate exists in the cache.
+   */
+  async verifyCertificate(
+    certificateId: string
+  ): Promise<CertificateVerificationResult> {
+    const id = certificateId?.trim();
+    if (!id) {
+      throw new AppError(
+        "Certificate id is required",
+        StatusCodes.BAD_REQUEST,
+        "MISSING_CERTIFICATE_ID"
+      );
+    }
+
+    const cached = await this.findCachedForVerification(id);
+    if (!cached) {
+      throw new AppError(
+        "Certificate not found",
+        StatusCodes.NOT_FOUND,
+        "CERTIFICATE_NOT_FOUND"
+      );
+    }
+
+    const offChain = toOffChainData(cached);
+    const onChainRecord = await this.provenanceFactory().getCertificate(
+      cached.certificateId
+    );
+    const onChain = onChainRecord
+      ? toOnChainData(cached.certificateId, onChainRecord)
+      : null;
+
+    const checks = compareCertificates(offChain, onChain);
+    const mismatches = collectMismatches(checks);
+    const valid = onChain !== null && Object.values(checks).every(Boolean);
+
+    const details: CertificateVerificationDetails = {
+      certificateId: cached.certificateId,
+      network: cached.stellarNetwork,
+      contractAddress: cached.contractAddress,
+      offChain,
+      onChain,
+      checks,
+      mismatches,
+    };
+
+    return { valid, details };
+  }
+
+  /** Loads the cache document plus every relation needed for verification. */
+  private async findCachedForVerification(
+    id: string
+  ): Promise<PopulatedVerificationCertificate | null> {
+    const query = mongoose.Types.ObjectId.isValid(id)
+      ? { $or: [{ _id: id }, { certificateId: id }] }
+      : { certificateId: id };
+
+    return Certificate.findOne(query)
+      .populate("manifestId", "manifestHash creator")
+      .populate("assetId", "storageReferenceId")
+      .populate("creatorId", "stellarPublicKey")
+      .populate("verificationJobId", "ownerPublicKey teeAttestationHash")
+      .lean<PopulatedVerificationCertificate>();
+  }
+}
+
+/** The on-chain `creator` is the mint recipient (the verification requester). */
+function resolveCreator(cached: PopulatedVerificationCertificate): string | null {
+  return (
+    cached.verificationJobId?.ownerPublicKey ??
+    cached.creatorId?.stellarPublicKey ??
+    cached.manifestId?.creator ??
+    null
+  );
+}
+
+function toOffChainData(
+  cached: PopulatedVerificationCertificate
+): CertificateVerificationData {
+  return {
+    certificateId: cached.certificateId,
+    storageId: cached.assetId?.storageReferenceId ?? null,
+    manifestHash: cached.manifestId?.manifestHash ?? null,
+    attestationHash: cached.verificationJobId?.teeAttestationHash ?? null,
+    creator: resolveCreator(cached),
+    timestamp: cached.mintedAt
+      ? new Date(cached.mintedAt).toISOString()
+      : null,
+  };
+}
+
+function toOnChainData(
+  certificateId: string,
+  record: OnChainCertificate
+): CertificateVerificationData {
+  return {
+    certificateId,
+    storageId: record.storageId,
+    manifestHash: record.manifestHash,
+    attestationHash: record.attestationHash,
+    creator: record.creator,
+    timestamp: record.timestamp.toISOString(),
+  };
+}
+
+/** Hashes are compared case-insensitively; CIDs and addresses are exact. */
+function compareCertificates(
+  offChain: CertificateVerificationData,
+  onChain: CertificateVerificationData | null
+): CertificateVerificationChecks {
+  if (!onChain) {
+    return {
+      storageId: false,
+      manifestHash: false,
+      attestationHash: false,
+      creator: false,
+      timestamp: false,
+    };
+  }
+
+  return {
+    storageId: offChain.storageId === onChain.storageId,
+    manifestHash: equalsIgnoreCase(offChain.manifestHash, onChain.manifestHash),
+    attestationHash: equalsIgnoreCase(
+      offChain.attestationHash,
+      onChain.attestationHash
+    ),
+    creator: offChain.creator === onChain.creator,
+    timestamp: equalsTimestamp(offChain.timestamp, onChain.timestamp),
+  };
+}
+
+function equalsIgnoreCase(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/** Compares two ISO timestamps at second precision (ledger time is u64s). */
+function equalsTimestamp(a: string | null, b: string | null): boolean {
+  if (a === null || b === null) return a === b;
+  const left = Math.floor(new Date(a).getTime() / 1_000);
+  const right = Math.floor(new Date(b).getTime() / 1_000);
+  return Number.isFinite(left) && Number.isFinite(right) && left === right;
+}
+
+function collectMismatches(checks: CertificateVerificationChecks): string[] {
+  return (Object.keys(checks) as (keyof CertificateVerificationChecks)[]).filter(
+    (key) => !checks[key]
+  );
+}
+
+/**
+ * Builds the production {@link ProvenanceContract} read client. Loaded lazily
+ * so the service (and its unit tests) never require Stellar credentials.
+ */
+function createProvenanceReader(): Pick<ProvenanceContract, "getCertificate"> {
+  const { env } = require("../config/env") as typeof import("../config/env");
+  const { ProvenanceContract } = require("./contracts/ProvenanceContract") as typeof import("./contracts/ProvenanceContract");
+  const { SorobanContractQueryClient } = require("./contracts/ContractReader") as typeof import("./contracts/ContractReader");
+  const { Keypair, StrKey } = require("@stellar/stellar-sdk") as typeof import("@stellar/stellar-sdk");
+
+  if (!StrKey.isValidEd25519SecretSeed(env.STELLAR_ORACLE_SECRET_KEY)) {
+    throw new AppError(
+      "STELLAR_ORACLE_SECRET_KEY must be a valid Stellar secret seed",
+      StatusCodes.INTERNAL_SERVER_ERROR,
+      "PROVENANCE_CONFIG_INVALID"
+    );
+  }
+
+  const sourceAccount = Keypair.fromSecret(
+    env.STELLAR_ORACLE_SECRET_KEY
+  ).publicKey();
+  const queryClient = new SorobanContractQueryClient(sourceAccount);
+  return new ProvenanceContract(env.STELLAR_PROVENANCE_CONTRACT_ID, queryClient);
 }
 
 export const certificateService = new CertificateService();

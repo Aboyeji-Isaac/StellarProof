@@ -31,6 +31,48 @@ export interface CertificateListResult {
   skip: number;
 }
 
+/**
+ * Normalized certificate payload shared by the off-chain cache and the
+ * on-chain provenance record. `null` marks data that could not be resolved
+ * on either side.
+ */
+export interface CertificateVerificationData {
+  certificateId: string;
+  storageId: string | null;
+  manifestHash: string | null;
+  attestationHash: string | null;
+  creator: string | null;
+  /** ISO-8601 timestamp. */
+  timestamp: string | null;
+}
+
+/** Field-by-field equality between the cache and the ledger record. */
+export interface CertificateVerificationChecks {
+  storageId: boolean;
+  manifestHash: boolean;
+  attestationHash: boolean;
+  creator: boolean;
+  timestamp: boolean;
+}
+
+/** Full verification payload returned by GET /api/v1/certificates/verify/:id. */
+export interface CertificateVerificationDetails {
+  certificateId: string;
+  network: 'testnet' | 'mainnet';
+  contractAddress: string;
+  offChain: CertificateVerificationData;
+  onChain: CertificateVerificationData | null;
+  checks: CertificateVerificationChecks;
+  /** Human-readable list of fields that failed verification. */
+  mismatches: string[];
+}
+
+/** Result envelope: `valid` is true only when every field matches. */
+export interface CertificateVerificationResult {
+  valid: boolean;
+  details: CertificateVerificationDetails;
+}
+
 /** Standard JSON envelope returned by every endpoint. */
 export interface ApiResponse<T = unknown> {
   success: boolean;
