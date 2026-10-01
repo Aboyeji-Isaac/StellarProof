@@ -1,0 +1,15 @@
+//Included Views for the Figma Light Mode Design//
+
+Security Audit Logs
+List View — streamlined event history for account activity, KMS operations, and TEE executions.
+Table View — structured audit records for detailed event inspection.
+Grid View — visual event presentation for browsing security activity.
+
+
+Design Approach
+
+The four screens use the StellarProof Light Mode direction with emphasis on readable technical data, consistent navigation, clear event states, and reusable interface patterns.
+
+The Figma file also accounts for responsive layouts, component reuse, auto-layout, spacing consistency, and organized layer structures.
+
+https://www.figma.com/design/2kP82C0Z8z0X3CncLQmfhB/Stellar-Project-Fig?node-id=3104-2&p=f&t=YxVm0kSu6XqIEPkD-0

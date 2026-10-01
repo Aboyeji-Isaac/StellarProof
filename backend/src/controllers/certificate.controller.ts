@@ -54,6 +54,36 @@ export class CertificateController {
       next(err);
     }
   }
+
+  /**
+   * GET /api/v1/certificates/verify/:certificateId
+   * Verifies a cached certificate against on-chain provenance data.
+   */
+  async verifyCertificate(
+    req: Request,
+    res: Response,
+    next: NextFunction
+  ): Promise<void> {
+    try {
+      const certificateId = req.params.certificateId?.trim();
+      if (!certificateId) {
+        throw new AppError(
+          "Certificate id is required",
+          StatusCodes.BAD_REQUEST,
+          "MISSING_CERTIFICATE_ID"
+        );
+      }
+
+      const result = await certificateService.verifyCertificate(certificateId);
+
+      res.status(StatusCodes.OK).json({
+        success: true,
+        data: result,
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
 }
 
 export const certificateController = new CertificateController();
@@ -63,3 +93,9 @@ export const getCertificateById = (
   res: Response,
   next: NextFunction
 ): Promise<void> => certificateController.getCertificateById(req, res, next);
+
+export const verifyCertificate = (
+  req: Request,
+  res: Response,
+  next: NextFunction
+): Promise<void> => certificateController.verifyCertificate(req, res, next);

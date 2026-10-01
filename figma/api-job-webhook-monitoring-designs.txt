@@ -1,0 +1,16 @@
+Delivered Interfaces
+API Job Management
+
+Three complementary layouts were created to support different workflows:
+
+List View
+Optimized for quick scanning of verification jobs and processing states.
+Table View
+Structured presentation of job metadata, timestamps, progress indicators, and result summaries.
+Grid View
+Card-oriented layout for visually monitoring batches and grouped job activity.
+Webhook Delivery Logs
+Table View
+Detailed inspection interface for webhook requests, response codes, retry states, and delivery outcomes.
+
+https://www.figma.com/design/2kP82C0Z8z0X3CncLQmfhB/Stellar-Project-Fig?node-id=3104-2&p=f&t=YxVm0kSu6XqIEPkD-0

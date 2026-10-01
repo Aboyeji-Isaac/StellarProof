@@ -1,4 +1,7 @@
-import { listCertificatesQuerySchema } from "../routes/certificate.routes";
+import {
+  listCertificatesQuerySchema,
+  verifyCertificateParamsSchema,
+} from "../routes/certificate.routes";
 
 describe("listCertificatesQuerySchema", () => {
   it("accepts a bare request for the public global index", () => {
@@ -71,6 +74,51 @@ describe("listCertificatesQuerySchema", () => {
   it("rejects an over-long search term", () => {
     expect(
       listCertificatesQuerySchema.safeParse({ search: "x".repeat(300) }).success,
+    ).toBe(false);
+  });
+});
+
+describe("verifyCertificateParamsSchema", () => {
+  it("accepts a numeric on-chain certificate id", () => {
+    const result = verifyCertificateParamsSchema.safeParse({ certificateId: "41" });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.certificateId).toBe("41");
+    }
+  });
+
+  it("accepts a MongoDB ObjectId", () => {
+    expect(
+      verifyCertificateParamsSchema.safeParse({
+        certificateId: "665f1e2b3f4a5b6c7d8e9f01",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("trims surrounding whitespace", () => {
+    const result = verifyCertificateParamsSchema.safeParse({
+      certificateId: "  41  ",
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.certificateId).toBe("41");
+    }
+  });
+
+  it("rejects an empty or whitespace-only id", () => {
+    expect(
+      verifyCertificateParamsSchema.safeParse({ certificateId: "" }).success,
+    ).toBe(false);
+    expect(
+      verifyCertificateParamsSchema.safeParse({ certificateId: "   " }).success,
+    ).toBe(false);
+  });
+
+  it("rejects an over-long id", () => {
+    expect(
+      verifyCertificateParamsSchema.safeParse({
+        certificateId: "x".repeat(200),
+      }).success,
     ).toBe(false);
   });
 });

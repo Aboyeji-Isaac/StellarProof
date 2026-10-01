@@ -8,6 +8,10 @@
  *     certificate index. `search` matches the on-chain certificateId,
  *     transactionHash and contractAddress (case-insensitive).
  *
+ *   GET /api/v1/certificates/verify/:certificateId
+ *     Publicly verifies a certificate by cross-checking the off-chain cache
+ *     against `provenance.get_certificate` and returning `{ valid, details }`.
+ *
  * All Zod schemas are co-located with the routes that use them.
  */
 import { Router } from "express";
@@ -56,6 +60,19 @@ export const listCertificatesQuerySchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
+// Zod schema – path parameters for the public verification endpoint.
+// Accepts either a certificate `certificateId` or a MongoDB ObjectId, so no
+// format is enforced beyond a sane length.
+// ---------------------------------------------------------------------------
+export const verifyCertificateParamsSchema = z.object({
+  certificateId: z
+    .string()
+    .trim()
+    .min(1, "certificateId is required")
+    .max(128, "certificateId must be at most 128 characters"),
+});
+
+// ---------------------------------------------------------------------------
 // Query validation middleware
 // ---------------------------------------------------------------------------
 function validateListCertificatesQuery(
@@ -77,9 +94,50 @@ function validateListCertificatesQuery(
 }
 
 // ---------------------------------------------------------------------------
+// Path parameter validation middleware
+// ---------------------------------------------------------------------------
+function validateVerifyCertificateParams(
+  req: Request,
+  res: Response,
+  next: NextFunction
+): void {
+  const result = verifyCertificateParamsSchema.safeParse(req.params);
+  if (!result.success) {
+    res.status(StatusCodes.BAD_REQUEST).json({
+      success: false,
+      error: "Invalid path parameters",
+      details: result.error.flatten().fieldErrors,
+    });
+    return;
+  }
+  next();
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 const router = Router();
+
+/**
+ * GET /api/v1/certificates/verify/:certificateId
+ *
+ * Public verification endpoint. Cross-checks the off-chain certificate cache
+ * against the ledger-stored provenance record.
+ *
+ * Response 200:
+ * {
+ *   "success": true,
+ *   "data": {
+ *     "valid": true,
+ *     "details": { "certificateId": "41", "onChain": { ... }, ... }
+ *   }
+ * }
+ */
+router.get(
+  "/verify/:certificateId",
+  validateVerifyCertificateParams,
+  certificateController.verifyCertificate.bind(certificateController)
+);
 
 /**
  * GET /api/v1/certificates?creatorId=<ObjectId>&search=<term>&limit=20&skip=0
