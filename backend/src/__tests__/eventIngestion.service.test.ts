@@ -144,7 +144,24 @@ describe("EventIngestionService", () => {
           {
             type: "contract",
             contractIds: [h.registryContractId],
-            topics: [[xdr.ScVal.scvSymbol("registry").toXDR("base64"), "*"]],
+            topics: [
+              [
+                xdr.ScVal.scvSymbol("registry").toXDR("base64"),
+                xdr.ScVal.scvSymbol("TeeHashAdded").toXDR("base64"),
+              ],
+              [
+                xdr.ScVal.scvSymbol("registry").toXDR("base64"),
+                xdr.ScVal.scvSymbol("TeeHashRemoved").toXDR("base64"),
+              ],
+              [
+                xdr.ScVal.scvSymbol("registry").toXDR("base64"),
+                xdr.ScVal.scvSymbol("ProviderAdded").toXDR("base64"),
+              ],
+              [
+                xdr.ScVal.scvSymbol("registry").toXDR("base64"),
+                xdr.ScVal.scvSymbol("ProviderRemoved").toXDR("base64"),
+              ],
+            ],
           },
         ],
       })
