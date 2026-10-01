@@ -1,4 +1,4 @@
-import { scValToNative, StrKey, type rpc } from "@stellar/stellar-sdk";
+import { scValToNative, StrKey, xdr, type rpc } from "@stellar/stellar-sdk";
 import { StatusCodes } from "http-status-codes";
 import { AppError } from "../errors/AppError";
 import { EventIngestionCursorModel } from "../models/EventIngestionCursor.model";
@@ -13,6 +13,14 @@ import {
 } from "./sorobanEventBus.service";
 
 const STREAM = "oracle-provenance-events";
+
+const TOPIC_VERIFICATION_REQUEST = xdr.ScVal.scvSymbol("VerificationRequest").toXDR("base64");
+const TOPIC_ATTESTATION = xdr.ScVal.scvSymbol("Attestation").toXDR("base64");
+const TOPIC_ATTESTED = xdr.ScVal.scvSymbol("Attested").toXDR("base64");
+const TOPIC_CERTIFICATE_MINTED = xdr.ScVal.scvSymbol("CertificateMinted").toXDR("base64");
+const TOPIC_REGISTRY = xdr.ScVal.scvSymbol("registry").toXDR("base64");
+
+let defaultSubscriberRegistered = false;
 
 interface EventCursorStore {
   get(): Promise<{ cursor: string; latestLedger: number } | null>;
@@ -85,6 +93,8 @@ function eventName(event: rpc.Api.EventResponse): string | undefined {
     .find((topic) => {
       const normalized = topic?.toLowerCase();
       return (
+        normalized === "verificationrequest" ||
+        normalized === "verification_request" ||
         normalized === "attestation" ||
         normalized === "attested" ||
         normalized === "certificateminted" ||
@@ -125,9 +135,28 @@ export class EventIngestionService {
     const saved = await this.cursors.get();
     const response = await this.rpcClient.getEvents({
       filters: [
-        { type: "contract", contractIds: [this.config.oracleContractId] },
-        { type: "contract", contractIds: [this.config.provenanceContractId] },
-        { type: "contract", contractIds: [this.config.registryContractId] },
+        {
+          type: "contract",
+          contractIds: [this.config.oracleContractId],
+          // Keep the existing attestation compatibility while adding the
+          // VerificationRequest topic required by #684.
+          topics: [
+            [TOPIC_VERIFICATION_REQUEST],
+            [TOPIC_ATTESTATION],
+            [TOPIC_ATTESTED],
+          ],
+        },
+        {
+          type: "contract",
+          contractIds: [this.config.provenanceContractId],
+          topics: [[TOPIC_CERTIFICATE_MINTED]],
+        },
+        {
+          type: "contract",
+          contractIds: [this.config.registryContractId],
+          // Registry events are published as ("registry", EventName, ...).
+          topics: [[TOPIC_REGISTRY, "*"]],
+        },
       ],
       limit: this.config.limit,
       ...(saved?.cursor
@@ -186,6 +215,22 @@ export class EventIngestionService {
     manifestHash: string | undefined,
     requestId: string | undefined
   ): IngestedSorobanEvent {
+    if (name === "verificationrequest" || name === "verification_request") {
+      return {
+        kind: "verificationRequest",
+        eventId: event.id,
+        ledger: event.ledger,
+        transactionHash: event.txHash,
+        requestId:
+          field(payload, "request_id", "requestId", "id") ??
+          this.topicRequestId(event),
+        contentHash:
+          field(payload, "content_hash", "contentHash") ??
+          this.topicManifestHash(event),
+        state: field(payload, "state"),
+      };
+    }
+
     if (name === "certificateminted") {
       return {
         kind: "certificateMinted",
@@ -267,30 +312,35 @@ export function createEventIngestionService(): EventIngestionService {
   const { env } = require("../config/env") as typeof import("../config/env");
   const { sorobanService } = require("./soroban.service") as typeof import("./soroban.service");
 
-  sorobanEventBus.subscribe(async (event) => {
-    if (event.kind === "registry") return false;
+  if (!defaultSubscriberRegistered) {
+    defaultSubscriberRegistered = true;
+    sorobanEventBus.subscribe(async (event) => {
+      if (event.kind === "registry" || event.kind === "verificationRequest") {
+        return false;
+      }
 
-    const job =
-      event.kind === "certificateMinted"
-        ? await verificationService.completeFromMintEvent({
-            manifestHash: event.manifestHash,
-            requestId: event.requestId,
-            certificateId: event.certificateId,
-            transactionHash: event.transactionHash,
-          })
-        : await verificationService.advanceFromAttestationEvent({
-            manifestHash: event.manifestHash,
-            requestId: event.requestId,
-            attestationHash: event.attestationHash,
-            transactionHash: event.transactionHash,
-          });
+      const job =
+        event.kind === "certificateMinted"
+          ? await verificationService.completeFromMintEvent({
+              manifestHash: event.manifestHash,
+              requestId: event.requestId,
+              certificateId: event.certificateId,
+              transactionHash: event.transactionHash,
+            })
+          : await verificationService.advanceFromAttestationEvent({
+              manifestHash: event.manifestHash,
+              requestId: event.requestId,
+              attestationHash: event.attestationHash,
+              transactionHash: event.transactionHash,
+            });
 
-    if (!job) return false;
-    if (event.kind === "attestation" && job._id) {
-      await mintService.mintForJob(String(job._id));
-    }
-    return true;
-  });
+      if (!job) return false;
+      if (event.kind === "attestation" && job._id) {
+        await mintService.mintForJob(String(job._id));
+      }
+      return true;
+    });
+  }
 
   return new EventIngestionService(
     sorobanService,
