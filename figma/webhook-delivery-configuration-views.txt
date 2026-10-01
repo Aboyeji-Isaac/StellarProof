@@ -1,0 +1,10 @@
+Webhook Delivery Logs
+List View — compact presentation of webhook delivery activity, including HTTP response outcomes.
+Grid View — card-oriented representation of delivery records for visual status inspection.
+Webhook Configuration
+Grid View — endpoint configuration cards for managing real-time verification update destinations.
+Table View — structured endpoint records with configuration details presented in a tabular format.
+
+Link here for reference
+
+https://www.figma.com/design/2kP82C0Z8z0X3CncLQmfhB/Stellar-Project-Fig?node-id=3104-2&p=f&t=YxVm0kSu6XqIEPkD-0
